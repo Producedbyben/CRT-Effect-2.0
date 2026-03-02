@@ -406,6 +406,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   const presets = { ...FALLBACK_PRESETS };
   let start = performance.now();
   let previewFrameSeconds = 0;
+  let previewTargetSeconds = 0;
+  let previewNeedsSeek = false;
   let lastPreviewTick = 0;
 
   function setStatus(message, mode = "info") {
@@ -439,8 +441,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     const previewTime = document.getElementById("previewTime");
     const max = loadedVideo?.video?.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
     previewTime.max = max.toFixed(3);
-    previewFrameSeconds = Math.max(0, Math.min(previewFrameSeconds, max));
-    previewTime.value = previewFrameSeconds.toFixed(3);
+    previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
+    previewFrameSeconds = previewTargetSeconds;
+    previewTime.value = previewTargetSeconds.toFixed(3);
+    previewNeedsSeek = loadedSourceType === "video";
   }
 
   function readParams() {
@@ -545,12 +549,15 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (loadedSourceType === "video" && loadedVideo?.video) {
       const video = loadedVideo.video;
       if (isStillPreviewMode()) {
-        const targetSeconds = Math.max(0, Number(document.getElementById("previewTime").value) || 0);
-        if (Math.abs(previewFrameSeconds - targetSeconds) > 0.0005) {
-          previewFrameSeconds = targetSeconds;
-          seekVideo(video, previewFrameSeconds)
-            .then(() => renderer.setImage(video))
+        if (previewNeedsSeek || Math.abs(video.currentTime - previewTargetSeconds) > 0.0005) {
+          previewNeedsSeek = false;
+          seekVideo(video, previewTargetSeconds)
+            .then(() => {
+              previewFrameSeconds = previewTargetSeconds;
+              renderer.setImage(video);
+            })
             .catch((error) => {
+              previewNeedsSeek = true;
               console.warn("Preview seek failed", error);
             });
         }
@@ -561,6 +568,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
           lastPreviewTick = now;
           renderer.setImage(video);
           previewFrameSeconds = video.currentTime;
+          previewTargetSeconds = previewFrameSeconds;
           document.getElementById("previewTime").value = previewFrameSeconds.toFixed(3);
         }
       }
@@ -608,6 +616,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         canvas.width = videoSource.video.videoWidth;
         canvas.height = videoSource.video.videoHeight;
         document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+        previewTargetSeconds = 0;
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
         updatePreviewControlsState();
@@ -619,6 +628,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         renderer.setImage(imageSource);
         if (typeof imageSource.close === "function") imageSource.close();
         loadedSourceType = "image";
+        previewTargetSeconds = 0;
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
         updatePreviewControlsState();
@@ -645,6 +655,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   });
 
   document.getElementById("previewMode").addEventListener("change", () => {
+    if (isStillPreviewMode()) {
+      previewNeedsSeek = true;
+    }
     updatePreviewControlsState();
     progressEl.value = 0;
   });
@@ -658,7 +671,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   });
 
   document.getElementById("previewTime").addEventListener("input", (event) => {
-    previewFrameSeconds = Number(event.target.value) || 0;
+    previewTargetSeconds = Number(event.target.value) || 0;
+    previewNeedsSeek = true;
     progressEl.value = 0;
   });
 
