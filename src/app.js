@@ -4,7 +4,7 @@ const FALLBACK_PRESETS = {
     phosphorMask: 0.5,
     barrelDistortion: 0,
     bloom: 0.5,
-    flicker: 0.5,
+    flicker: 0.22,
     chromaticAberration: 0.5,
     noise: 0.5,
     pixelSize: 1,
@@ -61,7 +61,9 @@ class CRTRenderer {
     this.sourceCanvas.height = Math.max(1, Math.round(inputHeight * scale));
     const ctx = this.sourceCanvas.getContext("2d");
     ctx.clearRect(0, 0, this.sourceCanvas.width, this.sourceCanvas.height);
-    ctx.drawImage(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(img, 0, 0, inputWidth, inputHeight, 0, 0, this.sourceCanvas.width, this.sourceCanvas.height);
     this.hasImage = true;
   }
 
