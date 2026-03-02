@@ -245,7 +245,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }) {
+async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress }) {
   if (!("VideoEncoder" in window)) {
     throw new Error("WebCodecs VideoEncoder is unavailable in this browser/context.");
   }
@@ -281,6 +281,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
 
   for (let frame = 0; frame < totalFrames; frame++) {
     const t = frame / fps;
+    if (beforeRenderFrame) await beforeRenderFrame(t, frame, fps);
     renderer.render(ctx, width, height, t, params, frame, fps);
     const videoFrame = new VideoFrame(canvas, {
       timestamp: Math.round((frame * 1_000_000) / fps),
@@ -321,7 +322,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     "noise",
   ];
 
-  let hasLoadedImage = false;
+  let hasLoadedSource = false;
+  let loadedSourceType = "image";
+  let loadedVideo = null;
   const presets = { ...FALLBACK_PRESETS };
   let start = performance.now();
 
@@ -331,7 +334,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
   }
 
   function setExportAvailability() {
-    exportBtn.disabled = !hasLoadedImage;
+    exportBtn.disabled = !hasLoadedSource;
   }
 
   function readParams() {
@@ -393,10 +396,46 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     return img;
   }
 
+  function waitForVideoEvent(video, eventName) {
+    return new Promise((resolve) => {
+      const handler = () => {
+        video.removeEventListener(eventName, handler);
+        resolve();
+      };
+      video.addEventListener(eventName, handler, { once: true });
+    });
+  }
+
+  async function loadVideoFromFile(file) {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+    const objectUrl = URL.createObjectURL(file);
+    video.src = objectUrl;
+    await waitForVideoEvent(video, "loadedmetadata");
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      throw new Error("Video metadata is invalid or duration is unavailable.");
+    }
+    await video.play().catch(() => {});
+    return { video, objectUrl };
+  }
+
+  async function seekVideo(video, timeSeconds) {
+    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, video.duration - 0.000001)));
+    if (Math.abs(video.currentTime - clamped) < 0.0005) return;
+    video.currentTime = clamped;
+    await waitForVideoEvent(video, "seeked");
+  }
+
   function animate(now) {
     const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
     const elapsed = (now - start) / 1000;
     const frame = Math.floor(elapsed * fps);
+    if (loadedSourceType === "video" && loadedVideo?.video) {
+      renderer.setImage(loadedVideo.video);
+    }
     renderer.render(ctx, canvas.width, canvas.height, frame / fps, readParams(), frame, fps);
     requestAnimationFrame(animate);
   }
@@ -405,24 +444,45 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     const file = event.target.files?.[0];
     if (!file) return;
 
+    if (loadedVideo?.objectUrl) {
+      URL.revokeObjectURL(loadedVideo.objectUrl);
+      loadedVideo = null;
+    }
+
     progressEl.value = 0.05;
     setStatus(`Processing ${file.name} (${Math.round(file.size / 1024)} KB)...`, "info");
 
     try {
-      const imageSource = await loadImageFromFile(file);
-      progressEl.value = 0.4;
-      renderer.setImage(imageSource);
-      if (typeof imageSource.close === "function") imageSource.close();
+      if (file.type === "video/mp4") {
+        const videoSource = await loadVideoFromFile(file);
+        progressEl.value = 0.4;
+        renderer.setImage(videoSource.video);
+        loadedVideo = videoSource;
+        loadedSourceType = "video";
+
+        canvas.width = videoSource.video.videoWidth;
+        canvas.height = videoSource.video.videoHeight;
+        document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+
+        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s).`, "success");
+      } else {
+        const imageSource = await loadImageFromFile(file);
+        progressEl.value = 0.4;
+        renderer.setImage(imageSource);
+        if (typeof imageSource.close === "function") imageSource.close();
+        loadedSourceType = "image";
+        setStatus(`Loaded image ${file.name}. Ready to export.`, "success");
+      }
+
       progressEl.value = 1;
-      hasLoadedImage = true;
+      hasLoadedSource = true;
       setExportAvailability();
       start = performance.now();
-      setStatus(`Loaded ${file.name}. Ready to export.`, "success");
     } catch (error) {
-      hasLoadedImage = false;
+      hasLoadedSource = false;
       progressEl.value = 0;
       setExportAvailability();
-      setStatus(`Couldn't load image: ${error.message}`, "error");
+      setStatus(`Couldn't load media: ${error.message}`, "error");
       console.error(error);
     }
   });
@@ -434,8 +494,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
   });
 
   exportBtn.addEventListener("click", async () => {
-    if (!hasLoadedImage) {
-      setStatus("Load an image before exporting.", "warn");
+    if (!hasLoadedSource) {
+      setStatus("Load an image or video before exporting.", "warn");
       return;
     }
 
@@ -443,12 +503,21 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
       exportBtn.disabled = true;
       progressEl.value = 0;
       setStatus("Preparing export...", "info");
+      const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
+      const duration = Math.max(0.5, Number(document.getElementById("duration").value) || 4);
+
       await exportMp4({
         canvas,
         renderer,
         params: readParams(),
-        fps: Math.max(1, Number(document.getElementById("fps").value) || 60),
-        duration: Math.max(0.5, Number(document.getElementById("duration").value) || 4),
+        fps,
+        duration,
+        beforeRenderFrame: loadedSourceType === "video" && loadedVideo
+          ? async (t) => {
+              await seekVideo(loadedVideo.video, t);
+              renderer.setImage(loadedVideo.video);
+            }
+          : null,
         onProgress: (value, current, total) => {
           progressEl.value = value;
           setStatus(`Encoding frame ${current}/${total}`, "info");
@@ -471,6 +540,13 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
 
   setExportAvailability();
   initializePresets();
-  setStatus("Load an image to begin.", "info");
+  window.addEventListener("beforeunload", () => {
+    if (loadedVideo?.objectUrl) {
+      URL.revokeObjectURL(loadedVideo.objectUrl);
+    }
+  });
+
+
+  setStatus("Load an image or MP4 video to begin.", "info");
   requestAnimationFrame(animate);
 })();

@@ -8,8 +8,46 @@ export class CRTRenderer {
     this.sourceCanvas = document.createElement("canvas");
     this.workCanvas = document.createElement("canvas");
     this.maskCanvas = document.createElement("canvas");
+    this.effectCanvas = document.createElement("canvas");
+    this.luminanceCanvas = document.createElement("canvas");
     this.maskPattern = null;
     this.hasImage = false;
+  }
+
+  buildLuminanceMask(width, height) {
+    this.luminanceCanvas.width = width;
+    this.luminanceCanvas.height = height;
+    const lctx = this.luminanceCanvas.getContext("2d", { willReadFrequently: true });
+    lctx.clearRect(0, 0, width, height);
+    lctx.drawImage(this.workCanvas, 0, 0);
+
+    const data = lctx.getImageData(0, 0, width, height);
+    const px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const maxChannel = Math.max(px[i], px[i + 1], px[i + 2]) / 255;
+      const weight = Math.pow(maxChannel, 1.4);
+      const alpha = Math.round(weight * 255);
+      px[i] = 255;
+      px[i + 1] = 255;
+      px[i + 2] = 255;
+      px[i + 3] = alpha;
+    }
+    lctx.putImageData(data, 0, 0);
+  }
+
+  applyLuminanceEffect(outCtx, width, height, drawEffect) {
+    this.effectCanvas.width = width;
+    this.effectCanvas.height = height;
+    const ectx = this.effectCanvas.getContext("2d");
+    ectx.clearRect(0, 0, width, height);
+
+    drawEffect(ectx);
+
+    ectx.globalCompositeOperation = "destination-in";
+    ectx.drawImage(this.luminanceCanvas, 0, 0);
+    ectx.globalCompositeOperation = "source-over";
+
+    outCtx.drawImage(this.effectCanvas, 0, 0);
   }
 
   setImage(img) {
@@ -87,40 +125,51 @@ export class CRTRenderer {
     }
 
     outCtx.drawImage(this.workCanvas, 0, 0);
+    this.buildLuminanceMask(width, height);
 
     const scan = params.scanlineStrength;
-    outCtx.fillStyle = `rgba(0,0,0,${0.06 + scan * 0.5})`;
-    for (let y = 0; y < height; y += 2) outCtx.fillRect(0, y, width, 1);
+    this.applyLuminanceEffect(outCtx, width, height, (ctx) => {
+      ctx.fillStyle = `rgba(0,0,0,${0.06 + scan * 0.5})`;
+      for (let y = 0; y < height; y += 2) ctx.fillRect(0, y, width, 1);
+    });
 
     this.ensureMaskPattern(outCtx, params.phosphorMask);
-    outCtx.globalAlpha = params.phosphorMask;
-    outCtx.fillStyle = this.maskPattern;
-    outCtx.fillRect(0, 0, width, height);
-    outCtx.globalAlpha = 1;
+    this.applyLuminanceEffect(outCtx, width, height, (ctx) => {
+      ctx.globalAlpha = params.phosphorMask;
+      ctx.fillStyle = this.maskPattern;
+      ctx.fillRect(0, 0, width, height);
+      ctx.globalAlpha = 1;
+    });
 
     const bloom = params.bloom;
     if (bloom > 0) {
-      outCtx.save();
-      outCtx.globalAlpha = bloom * 0.5;
-      outCtx.filter = `blur(${1 + bloom * 6}px) brightness(${1 + bloom * 0.45})`;
-      outCtx.drawImage(outCtx.canvas, 0, 0);
-      outCtx.restore();
+      this.applyLuminanceEffect(outCtx, width, height, (ctx) => {
+        ctx.globalAlpha = bloom * 0.5;
+        ctx.filter = `blur(${1 + bloom * 6}px) brightness(${1 + bloom * 0.45})`;
+        ctx.drawImage(outCtx.canvas, 0, 0);
+        ctx.filter = "none";
+        ctx.globalAlpha = 1;
+      });
     }
 
     const flickerWave = Math.sin((frameIndex / fps) * Math.PI * 2 * 2.1) * 0.5 + 0.5;
     const flicker = params.flicker * (0.35 + flickerWave * 0.65);
-    outCtx.fillStyle = `rgba(255,255,255,${flicker * 0.12})`;
-    outCtx.fillRect(0, 0, width, height);
+    this.applyLuminanceEffect(outCtx, width, height, (ctx) => {
+      ctx.fillStyle = `rgba(255,255,255,${flicker * 0.12})`;
+      ctx.fillRect(0, 0, width, height);
+    });
 
     if (params.noise > 0) {
-      const count = Math.floor(width * height * 0.003 * params.noise);
-      for (let i = 0; i < count; i++) {
-        const x = Math.floor(seededNoise(i, seconds, frameIndex) * width);
-        const y = Math.floor(seededNoise(i * 2, seconds + 3.1, frameIndex) * height);
-        const a = seededNoise(x, y, frameIndex) * 0.2 * params.noise;
-        outCtx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
-        outCtx.fillRect(x, y, 1, 1);
-      }
+      this.applyLuminanceEffect(outCtx, width, height, (ctx) => {
+        const count = Math.floor(width * height * 0.003 * params.noise);
+        for (let i = 0; i < count; i++) {
+          const x = Math.floor(seededNoise(i, seconds, frameIndex) * width);
+          const y = Math.floor(seededNoise(i * 2, seconds + 3.1, frameIndex) * height);
+          const a = seededNoise(x, y, frameIndex) * 0.2 * params.noise;
+          ctx.fillStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+          ctx.fillRect(x, y, 1, 1);
+        }
+      });
     }
   }
 }
