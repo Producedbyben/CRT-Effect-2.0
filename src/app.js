@@ -498,6 +498,22 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     previewNeedsSeek = loadedSourceType === "video";
   }
 
+  function syncVideoPlaybackState() {
+    const video = loadedVideo?.video;
+    if (!video) return;
+
+    if (isStillPreviewMode()) {
+      if (!video.paused) {
+        video.pause();
+      }
+      return;
+    }
+
+    if (video.paused) {
+      video.play().catch(() => {});
+    }
+  }
+
 
 
   function resetParameters() {
@@ -545,34 +561,6 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (!silent) {
       setStatus("Source reset. Load a new image or video.", "info");
     }
-  }
-
-  function isStillPreviewMode() {
-    return document.getElementById("previewMode").value === "still";
-  }
-
-  function getPreviewScale() {
-    return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
-  }
-
-  function updatePreviewControlsState() {
-    const isVideo = loadedSourceType === "video" && loadedVideo?.video;
-    const stillMode = isStillPreviewMode();
-    const previewTime = document.getElementById("previewTime");
-    const previewFps = document.getElementById("previewFps");
-
-    previewTime.disabled = !isVideo;
-    previewFps.disabled = !isVideo || stillMode;
-  }
-
-  function syncPreviewTimeControl() {
-    const previewTime = document.getElementById("previewTime");
-    const max = loadedVideo?.video?.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
-    previewTime.max = max.toFixed(3);
-    previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
-    previewFrameSeconds = previewTargetSeconds;
-    previewTime.value = previewTargetSeconds.toFixed(3);
-    previewNeedsSeek = loadedSourceType === "video";
   }
 
   function readParams() {
@@ -658,7 +646,6 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
       throw new Error("Video metadata is invalid or duration is unavailable.");
     }
-    await video.play().catch(() => {});
     return { video, objectUrl };
   }
 
@@ -676,6 +663,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
     if (loadedSourceType === "video" && loadedVideo?.video) {
       const video = loadedVideo.video;
+      syncVideoPlaybackState();
       if (isStillPreviewMode()) {
         if (previewNeedsSeek || Math.abs(video.currentTime - previewTargetSeconds) > 0.0005) {
           previewNeedsSeek = false;
@@ -745,6 +733,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
         updatePreviewControlsState();
+        syncVideoPlaybackState();
 
         setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
       } else {
@@ -784,6 +773,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       previewNeedsSeek = true;
     }
     updatePreviewControlsState();
+    syncVideoPlaybackState();
     progressEl.value = 0;
   });
 
