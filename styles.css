@@ -97,3 +97,13 @@ progress {
 .video-controls select:disabled {
   opacity: 0.6;
 }
+
+
+.actions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.actions button {
+  margin-top: 0;
+}

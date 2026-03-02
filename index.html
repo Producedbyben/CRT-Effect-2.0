@@ -19,16 +19,16 @@
           <select id="presetSelect"></select>
         </label>
 
-        <label>Scanline strength <input id="scanlineStrength" type="range" min="0" max="1" step="0.01" value="0.35" /></label>
-        <label>Phosphor mask <input id="phosphorMask" type="range" min="0" max="1" step="0.01" value="0.4" /></label>
+        <label>Scanline strength <input id="scanlineStrength" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
+        <label>Phosphor mask <input id="phosphorMask" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
         <label>Barrel distortion <input id="barrelDistortion" type="range" min="-0.8" max="0.8" step="0.01" value="0" /></label>
-        <label>Bloom <input id="bloom" type="range" min="0" max="1" step="0.01" value="0.4" /></label>
-        <label>Flicker <input id="flicker" type="range" min="0" max="1" step="0.01" value="0.24" /></label>
-        <label>Chromatic aberration <input id="chromaticAberration" type="range" min="0" max="1" step="0.01" value="0.2" /></label>
-        <label>Noise <input id="noise" type="range" min="0" max="1" step="0.01" value="0.3" /></label>
+        <label>Bloom <input id="bloom" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
+        <label>Flicker <input id="flicker" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
+        <label>Chromatic aberration <input id="chromaticAberration" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
+        <label>Noise <input id="noise" type="range" min="0" max="1" step="0.01" value="0.5" /></label>
 
         <div class="row">
-          <label>FPS <input id="fps" type="number" value="60" min="12" max="120" /></label>
+          <label>FPS <input id="fps" type="number" value="30" min="12" max="120" /></label>
           <label>Duration (s) <input id="duration" type="number" value="4" min="1" max="20" step="0.5" /></label>
         </div>
 
@@ -55,7 +55,12 @@
           </label>
         </div>
 
-        <button id="exportBtn">Export MP4</button>
+        <div class="actions">
+          <button id="exportBtn">Export MP4</button>
+          <button id="cancelExportBtn" type="button" disabled>Cancel export</button>
+          <button id="resetParamsBtn" type="button">Reset parameters</button>
+          <button id="resetSourceBtn" type="button">Reset source</button>
+        </div>
         <div id="status" class="status">Load an image to begin.</div>
         <progress id="progress" max="1" value="0"></progress>
       </section>

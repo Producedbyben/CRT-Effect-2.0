@@ -1,12 +1,12 @@
 const FALLBACK_PRESETS = {
   "Consumer TV": {
-    scanlineStrength: 0.45,
-    phosphorMask: 0.36,
-    barrelDistortion: 0.04,
-    bloom: 0.45,
-    flicker: 0.26,
-    chromaticAberration: 0.3,
-    noise: 0.34,
+    scanlineStrength: 0.5,
+    phosphorMask: 0.5,
+    barrelDistortion: 0,
+    bloom: 0.5,
+    flicker: 0.5,
+    chromaticAberration: 0.5,
+    noise: 0.5,
   },
   "PVM/BVM": {
     scanlineStrength: 0.25,
@@ -324,12 +324,18 @@ function getTargetBitrate(width, height, fps) {
   return Math.max(5_000_000, Math.min(35_000_000, estimated));
 }
 
-async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress }) {
+async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress, signal }) {
   if (!("VideoEncoder" in window)) {
     throw new Error("WebCodecs VideoEncoder is unavailable in this browser/context.");
   }
 
   const { Muxer, ArrayBufferTarget } = await import(MP4_MUXER_CDN);
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DOMException("Export cancelled by user.", "AbortError");
+    }
+  };
+  throwIfAborted();
   const width = canvas.width;
   const height = canvas.height;
   const totalFrames = Math.max(1, Math.floor(duration * fps));
@@ -376,6 +382,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   for (let frame = 0; frame < totalFrames; frame++) {
+    throwIfAborted();
     if (encoderFailure) {
       throw encoderFailure;
     }
@@ -403,6 +410,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   await encoder.flush();
+  throwIfAborted();
   if (encoderFailure) {
     throw encoderFailure;
   }
@@ -421,6 +429,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   const progressEl = document.getElementById("progress");
   const previewBuffer = document.createElement("canvas");
   const exportBtn = document.getElementById("exportBtn");
+  const cancelExportBtn = document.getElementById("cancelExportBtn");
+  const resetParamsBtn = document.getElementById("resetParamsBtn");
+  const resetSourceBtn = document.getElementById("resetSourceBtn");
+  const imageInput = document.getElementById("imageInput");
   const presetSelect = document.getElementById("presetSelect");
 
   const controlIds = [
@@ -442,6 +454,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   let previewTargetSeconds = 0;
   let previewNeedsSeek = false;
   let lastPreviewTick = 0;
+  let defaultParamValues = null;
+  let activeExportController = null;
+  let isExporting = false;
 
   function setStatus(message, mode = "info") {
     statusEl.textContent = message;
@@ -449,7 +464,87 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   function setExportAvailability() {
-    exportBtn.disabled = !hasLoadedSource;
+    exportBtn.disabled = !hasLoadedSource || isExporting;
+    cancelExportBtn.disabled = !isExporting;
+    resetSourceBtn.disabled = isExporting;
+    imageInput.disabled = isExporting;
+  }
+
+  function isStillPreviewMode() {
+    return document.getElementById("previewMode").value === "still";
+  }
+
+  function getPreviewScale() {
+    return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
+  }
+
+  function updatePreviewControlsState() {
+    const isVideo = loadedSourceType === "video" && loadedVideo?.video;
+    const stillMode = isStillPreviewMode();
+    const previewTime = document.getElementById("previewTime");
+    const previewFps = document.getElementById("previewFps");
+
+    previewTime.disabled = !isVideo;
+    previewFps.disabled = !isVideo || stillMode;
+  }
+
+  function syncPreviewTimeControl() {
+    const previewTime = document.getElementById("previewTime");
+    const max = loadedVideo?.video?.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
+    previewTime.max = max.toFixed(3);
+    previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
+    previewFrameSeconds = previewTargetSeconds;
+    previewTime.value = previewTargetSeconds.toFixed(3);
+    previewNeedsSeek = loadedSourceType === "video";
+  }
+
+
+
+  function resetParameters() {
+    const targetValues = defaultParamValues || readParams();
+    for (const id of controlIds) {
+      if (typeof targetValues[id] === "number") {
+        document.getElementById(id).value = targetValues[id];
+      }
+    }
+    progressEl.value = 0;
+    setStatus("Parameters reset to defaults.", "success");
+  }
+
+  function clearLoadedSource({ silent = false } = {}) {
+    if (loadedVideo?.video) {
+      loadedVideo.video.pause();
+      loadedVideo.video.removeAttribute("src");
+      loadedVideo.video.load();
+    }
+    if (loadedVideo?.objectUrl) {
+      URL.revokeObjectURL(loadedVideo.objectUrl);
+    }
+
+    loadedVideo = null;
+    loadedSourceType = "image";
+    hasLoadedSource = false;
+    renderer.hasImage = false;
+
+    canvas.width = 960;
+    canvas.height = 540;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    imageInput.value = "";
+    document.getElementById("duration").value = "4";
+    previewTargetSeconds = 0;
+    previewFrameSeconds = 0;
+    previewNeedsSeek = false;
+    syncPreviewTimeControl();
+    updatePreviewControlsState();
+    progressEl.value = 0;
+    setExportAvailability();
+
+    if (!silent) {
+      setStatus("Source reset. Load a new image or video.", "info");
+    }
   }
 
   function isStillPreviewMode() {
@@ -575,7 +670,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   function animate(now) {
-    const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
+    const fps = Math.max(1, Number(document.getElementById("fps").value) || 30);
     const elapsed = (now - start) / 1000;
     const frame = Math.floor(elapsed * fps);
 
@@ -625,15 +720,12 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     requestAnimationFrame(animate);
   }
 
-  document.getElementById("imageInput").addEventListener("change", async (event) => {
+  imageInput.addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (loadedVideo?.objectUrl) {
-      URL.revokeObjectURL(loadedVideo.objectUrl);
-      loadedVideo = null;
-    }
-    updatePreviewControlsState();
+    if (isExporting) return;
+    clearLoadedSource({ silent: true });
 
     progressEl.value = 0.05;
     setStatus(`Processing ${file.name} (${Math.round(file.size / 1024)} KB)...`, "info");
@@ -716,10 +808,12 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     }
 
     try {
-      exportBtn.disabled = true;
+      isExporting = true;
+      activeExportController = new AbortController();
+      setExportAvailability();
       progressEl.value = 0;
       setStatus("Preparing export...", "info");
-      const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
+      const fps = Math.max(1, Number(document.getElementById("fps").value) || 30);
       const duration = Math.max(0.5, Number(document.getElementById("duration").value) || 4);
 
       await exportMp4({
@@ -738,14 +832,35 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
           progressEl.value = value;
           setStatus(`Encoding frame ${current}/${total}`, "info");
         },
+        signal: activeExportController.signal,
       });
       setStatus("Export finished. Download should begin automatically.", "success");
     } catch (error) {
-      setStatus(`Export failed: ${error.message}`, "error");
-      console.error(error);
+      if (error?.name === "AbortError") {
+        setStatus("Export cancelled.", "warn");
+      } else {
+        setStatus(`Export failed: ${error.message}`, "error");
+        console.error(error);
+      }
     } finally {
+      isExporting = false;
+      activeExportController = null;
       setExportAvailability();
     }
+  });
+
+  cancelExportBtn.addEventListener("click", () => {
+    if (!isExporting || !activeExportController) return;
+    activeExportController.abort();
+    setStatus("Cancelling export...", "warn");
+  });
+
+  resetParamsBtn.addEventListener("click", () => {
+    resetParameters();
+  });
+
+  resetSourceBtn.addEventListener("click", () => {
+    clearLoadedSource();
   });
 
   for (const id of [...controlIds, "fps", "duration"]) {
@@ -756,6 +871,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
   setExportAvailability();
   initializePresets();
+  defaultParamValues = readParams();
   updatePreviewControlsState();
   syncPreviewTimeControl();
   window.addEventListener("beforeunload", () => {
