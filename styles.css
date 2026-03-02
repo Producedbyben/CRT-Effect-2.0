@@ -83,3 +83,27 @@ progress {
 .status[data-mode="warn"] { color: #ffd879; }
 .status[data-mode="error"] { color: #ff9a9a; }
 .status[data-mode="info"] { color: #b5d3ff; }
+
+.video-controls {
+  padding: 0.55rem;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  background: #191919;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.video-controls input:disabled,
+.video-controls select:disabled {
+  opacity: 0.6;
+}
+
+
+.actions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.actions button {
+  margin-top: 0;
+}
