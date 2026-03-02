@@ -254,7 +254,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   const width = canvas.width;
   const height = canvas.height;
   const totalFrames = Math.max(1, Math.floor(duration * fps));
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
@@ -270,14 +270,27 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     },
   });
 
-  encoder.configure({
-    codec: "avc1.42001f",
-    width,
-    height,
-    framerate: fps,
-    bitrate: 5_000_000,
-    latencyMode: "quality",
-  });
+  try {
+    encoder.configure({
+      codec: "avc1.42001f",
+      width,
+      height,
+      framerate: fps,
+      bitrate: 5_000_000,
+      latencyMode: "quality",
+      hardwareAcceleration: "prefer-hardware",
+    });
+  } catch (error) {
+    console.warn("Hardware-accelerated encoder config unavailable; falling back.", error);
+    encoder.configure({
+      codec: "avc1.42001f",
+      width,
+      height,
+      framerate: fps,
+      bitrate: 5_000_000,
+      latencyMode: "quality",
+    });
+  }
 
   for (let frame = 0; frame < totalFrames; frame++) {
     const t = frame / fps;
@@ -306,7 +319,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 (function boot() {
   const renderer = new CRTRenderer();
   const canvas = document.getElementById("previewCanvas");
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
   const statusEl = document.getElementById("status");
   const progressEl = document.getElementById("progress");
   const exportBtn = document.getElementById("exportBtn");
@@ -412,8 +425,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     video.loop = true;
     video.playsInline = true;
     video.crossOrigin = "anonymous";
+    video.preload = "auto";
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
+    video.load();
     await waitForVideoEvent(video, "loadedmetadata");
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
       throw new Error("Video metadata is invalid or duration is unavailable.");
@@ -453,7 +468,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     setStatus(`Processing ${file.name} (${Math.round(file.size / 1024)} KB)...`, "info");
 
     try {
-      if (file.type === "video/mp4") {
+      if (file.type.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(file.name)) {
         const videoSource = await loadVideoFromFile(file);
         progressEl.value = 0.4;
         renderer.setImage(videoSource.video);
@@ -464,7 +479,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         canvas.height = videoSource.video.videoHeight;
         document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
 
-        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s).`, "success");
+        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
       } else {
         const imageSource = await loadImageFromFile(file);
         progressEl.value = 0.4;
@@ -547,6 +562,6 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   });
 
 
-  setStatus("Load an image or MP4 video to begin.", "info");
+  setStatus("Load an image or video (MP4/WebM/MOV/etc.) to begin.", "info");
   requestAnimationFrame(animate);
 })();
