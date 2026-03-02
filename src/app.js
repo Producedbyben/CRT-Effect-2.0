@@ -35,6 +35,13 @@ function seededNoise(x, y, frame) {
   return v - Math.floor(v);
 }
 
+const BAYER_4X4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
 class CRTRenderer {
   constructor() {
     this.sourceCanvas = document.createElement("canvas");
@@ -111,10 +118,12 @@ class CRTRenderer {
     const srcData = srcPixels.data;
     const dstData = outPixels.data;
 
-    const barrel = params.barrelDistortion;
+    const barrel = Math.max(-0.8, Math.min(0.8, params.barrelDistortion));
     const ca = params.chromaticAberration;
     const scan = params.scanlineStrength;
     const mask = params.phosphorMask;
+    const pixelStepX = width > 1 ? 1 / (width - 1) : 0;
+    const pixelStepY = height > 1 ? 1 / (height - 1) : 0;
 
     for (let y = 0; y < height; y++) {
       const ny = (y / (height - 1)) * 2 - 1;
@@ -124,7 +133,8 @@ class CRTRenderer {
       for (let x = 0; x < width; x++) {
         const nx = (x / (width - 1)) * 2 - 1;
         const r2 = nx * nx + ny * ny;
-        const warp = 1 + barrel * (0.28 + 0.72 * r2);
+        const warpCurve = 0.22 + 0.78 * r2;
+        const warp = Math.max(0.35, 1 + barrel * warpCurve);
         const srcNx = nx / warp;
         const srcNy = ny / warp;
         const u = srcNx * 0.5 + 0.5;
@@ -148,6 +158,30 @@ class CRTRenderer {
         const green = this.sampleBilinear(srcData, width, height, gu, v, 1);
         const blue = this.sampleBilinear(srcData, width, height, bu, v, 2);
 
+        const redHoriz =
+          this.sampleBilinear(srcData, width, height, ru - pixelStepX, v, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru + pixelStepX, v, 0) * 0.5;
+        const greenHoriz =
+          this.sampleBilinear(srcData, width, height, gu - pixelStepX, v, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu + pixelStepX, v, 1) * 0.5;
+        const blueHoriz =
+          this.sampleBilinear(srcData, width, height, bu - pixelStepX, v, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu + pixelStepX, v, 2) * 0.5;
+
+        const redVert =
+          this.sampleBilinear(srcData, width, height, ru, v - pixelStepY, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru, v + pixelStepY, 0) * 0.5;
+        const greenVert =
+          this.sampleBilinear(srcData, width, height, gu, v - pixelStepY, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu, v + pixelStepY, 1) * 0.5;
+        const blueVert =
+          this.sampleBilinear(srcData, width, height, bu, v - pixelStepY, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu, v + pixelStepY, 2) * 0.5;
+
+        const luminance = Math.max(red, green, blue) / 255;
+        const bleed = (0.08 + params.bloom * 0.26 + mask * 0.08) * Math.pow(luminance, 0.75);
+        const blend = Math.min(0.45, bleed);
+
         const triad = x % 3;
         const boost = 1 + mask * 0.52;
         const dim = 1 - mask * 0.32;
@@ -155,9 +189,15 @@ class CRTRenderer {
         const gMask = triad === 1 ? boost : dim;
         const bMask = triad === 2 ? boost : dim;
 
-        dstData[outIndex] = Math.min(255, red * scanlineGain * rMask);
-        dstData[outIndex + 1] = Math.min(255, green * scanlineGain * gMask);
-        dstData[outIndex + 2] = Math.min(255, blue * scanlineGain * bMask);
+        const dither = (BAYER_4X4[y & 3][x & 3] / 15 - 0.5) * (1.4 + params.noise * 2.2);
+
+        const redSoft = red * (1 - blend) + (redHoriz * 0.62 + redVert * 0.38) * blend;
+        const greenSoft = green * (1 - blend) + (greenHoriz * 0.62 + greenVert * 0.38) * blend;
+        const blueSoft = blue * (1 - blend) + (blueHoriz * 0.62 + blueVert * 0.38) * blend;
+
+        dstData[outIndex] = Math.min(255, Math.max(0, redSoft * scanlineGain * rMask + dither));
+        dstData[outIndex + 1] = Math.min(255, Math.max(0, greenSoft * scanlineGain * gMask + dither));
+        dstData[outIndex + 2] = Math.min(255, Math.max(0, blueSoft * scanlineGain * bMask + dither));
         dstData[outIndex + 3] = 255;
       }
     }
@@ -170,13 +210,22 @@ class CRTRenderer {
     const bloom = params.bloom;
     if (bloom > 0) {
       outCtx.save();
-      outCtx.globalAlpha = bloom * 0.38;
-      outCtx.filter = `blur(${1 + bloom * 7}px) brightness(${1 + bloom * 0.35})`;
-      outCtx.drawImage(outCtx.canvas, 0, 0);
+      outCtx.globalCompositeOperation = "screen";
+      outCtx.globalAlpha = 0.16 + bloom * 0.34;
+      outCtx.filter = `blur(${0.8 + bloom * 5.6}px) brightness(${1 + bloom * 0.55})`;
+      outCtx.drawImage(this.workCanvas, 0, 0);
+      outCtx.restore();
+
+      outCtx.save();
+      outCtx.globalCompositeOperation = "lighter";
+      outCtx.globalAlpha = 0.08 + bloom * 0.24;
+      outCtx.filter = `blur(${0.4 + bloom * 2.4}px)`;
+      outCtx.drawImage(this.workCanvas, 1, 0);
+      outCtx.drawImage(this.workCanvas, -1, 0);
       outCtx.restore();
     }
 
-    const vignette = Math.min(0.35, 0.08 + barrel * 0.22);
+    const vignette = Math.min(0.35, 0.08 + Math.abs(barrel) * 0.22);
     const grad = outCtx.createRadialGradient(
       width * 0.5,
       height * 0.5,
