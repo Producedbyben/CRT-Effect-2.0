@@ -294,6 +294,36 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+
+function getAvcCodecForResolution(width, height) {
+  const macroblocksPerFrame = Math.ceil(width / 16) * Math.ceil(height / 16);
+
+  // AVC level limits (max frame size in macroblocks).
+  const levelByMaxFs = [
+    { maxFs: 99, levelHex: "0a" },
+    { maxFs: 396, levelHex: "15" },
+    { maxFs: 1620, levelHex: "1e" },
+    { maxFs: 3600, levelHex: "1f" },
+    { maxFs: 8192, levelHex: "28" },
+    { maxFs: 8704, levelHex: "29" },
+    { maxFs: 22080, levelHex: "32" },
+    { maxFs: 36864, levelHex: "33" },
+    { maxFs: 139264, levelHex: "34" },
+  ];
+
+  const match = levelByMaxFs.find((entry) => macroblocksPerFrame <= entry.maxFs);
+  const levelHex = match ? match.levelHex : "34";
+
+  // Baseline profile (42 00) + computed level to avoid level-3.1 limits on larger videos.
+  return `avc1.4200${levelHex}`;
+}
+
+function getTargetBitrate(width, height, fps) {
+  const pixelsPerSecond = width * height * Math.max(1, fps);
+  const estimated = Math.round(pixelsPerSecond * 0.11);
+  return Math.max(5_000_000, Math.min(35_000_000, estimated));
+}
+
 async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress }) {
   if (!("VideoEncoder" in window)) {
     throw new Error("WebCodecs VideoEncoder is unavailable in this browser/context.");
@@ -320,24 +350,27 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     },
   });
 
+  const codec = getAvcCodecForResolution(width, height);
+  const bitrate = getTargetBitrate(width, height, fps);
+
   try {
     encoder.configure({
-      codec: "avc1.42001f",
+      codec,
       width,
       height,
       framerate: fps,
-      bitrate: 5_000_000,
+      bitrate,
       latencyMode: "quality",
       hardwareAcceleration: "prefer-hardware",
     });
   } catch (error) {
     console.warn("Hardware-accelerated encoder config unavailable; falling back.", error);
     encoder.configure({
-      codec: "avc1.42001f",
+      codec,
       width,
       height,
       framerate: fps,
-      bitrate: 5_000_000,
+      bitrate,
       latencyMode: "quality",
     });
   }
