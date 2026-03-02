@@ -312,10 +312,11 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     fastStart: "in-memory",
   });
 
+  let encoderFailure = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
     error: (err) => {
-      throw err;
+      encoderFailure = err;
     },
   });
 
@@ -342,15 +343,25 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   for (let frame = 0; frame < totalFrames; frame++) {
+    if (encoderFailure) {
+      throw encoderFailure;
+    }
+
     const t = frame / fps;
     if (beforeRenderFrame) await beforeRenderFrame(t, frame, fps);
     renderer.render(ctx, width, height, t, params, frame, fps);
+
     const videoFrame = new VideoFrame(canvas, {
       timestamp: Math.round((frame * 1_000_000) / fps),
       duration: Math.round(1_000_000 / fps),
     });
-    encoder.encode(videoFrame);
-    videoFrame.close();
+
+    try {
+      encoder.encode(videoFrame);
+    } finally {
+      videoFrame.close();
+    }
+
     onProgress?.((frame + 1) / totalFrames, frame + 1, totalFrames);
 
     if (frame % 30 === 0) {
@@ -359,6 +370,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   }
 
   await encoder.flush();
+  if (encoderFailure) {
+    throw encoderFailure;
+  }
+  encoder.close();
   muxer.finalize();
 
   const blob = new Blob([target.buffer], { type: "video/mp4" });
@@ -371,6 +386,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
   const statusEl = document.getElementById("status");
   const progressEl = document.getElementById("progress");
+  const previewBuffer = document.createElement("canvas");
   const exportBtn = document.getElementById("exportBtn");
   const presetSelect = document.getElementById("presetSelect");
 
@@ -389,6 +405,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   let loadedVideo = null;
   const presets = { ...FALLBACK_PRESETS };
   let start = performance.now();
+  let previewFrameSeconds = 0;
+  let previewTargetSeconds = 0;
+  let previewNeedsSeek = false;
+  let lastPreviewTick = 0;
 
   function setStatus(message, mode = "info") {
     statusEl.textContent = message;
@@ -397,6 +417,34 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
   function setExportAvailability() {
     exportBtn.disabled = !hasLoadedSource;
+  }
+
+  function isStillPreviewMode() {
+    return document.getElementById("previewMode").value === "still";
+  }
+
+  function getPreviewScale() {
+    return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
+  }
+
+  function updatePreviewControlsState() {
+    const isVideo = loadedSourceType === "video" && loadedVideo?.video;
+    const stillMode = isStillPreviewMode();
+    const previewTime = document.getElementById("previewTime");
+    const previewFps = document.getElementById("previewFps");
+
+    previewTime.disabled = !isVideo;
+    previewFps.disabled = !isVideo || stillMode;
+  }
+
+  function syncPreviewTimeControl() {
+    const previewTime = document.getElementById("previewTime");
+    const max = loadedVideo?.video?.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
+    previewTime.max = max.toFixed(3);
+    previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
+    previewFrameSeconds = previewTargetSeconds;
+    previewTime.value = previewTargetSeconds.toFixed(3);
+    previewNeedsSeek = loadedSourceType === "video";
   }
 
   function readParams() {
@@ -497,10 +545,50 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
     const elapsed = (now - start) / 1000;
     const frame = Math.floor(elapsed * fps);
+
     if (loadedSourceType === "video" && loadedVideo?.video) {
-      renderer.setImage(loadedVideo.video);
+      const video = loadedVideo.video;
+      if (isStillPreviewMode()) {
+        if (previewNeedsSeek || Math.abs(video.currentTime - previewTargetSeconds) > 0.0005) {
+          previewNeedsSeek = false;
+          seekVideo(video, previewTargetSeconds)
+            .then(() => {
+              previewFrameSeconds = previewTargetSeconds;
+              renderer.setImage(video);
+            })
+            .catch((error) => {
+              previewNeedsSeek = true;
+              console.warn("Preview seek failed", error);
+            });
+        }
+      } else {
+        const previewFps = Math.max(1, Number(document.getElementById("previewFps").value) || 15);
+        const minInterval = 1000 / previewFps;
+        if (now - lastPreviewTick >= minInterval) {
+          lastPreviewTick = now;
+          renderer.setImage(video);
+          previewFrameSeconds = video.currentTime;
+          previewTargetSeconds = previewFrameSeconds;
+          document.getElementById("previewTime").value = previewFrameSeconds.toFixed(3);
+        }
+      }
     }
-    renderer.render(ctx, canvas.width, canvas.height, frame / fps, readParams(), frame, fps);
+
+    const scale = getPreviewScale();
+    if (scale >= 0.999) {
+      renderer.render(ctx, canvas.width, canvas.height, frame / fps, readParams(), frame, fps);
+    } else {
+      previewBuffer.width = Math.max(1, Math.round(canvas.width * scale));
+      previewBuffer.height = Math.max(1, Math.round(canvas.height * scale));
+      const previewCtx = previewBuffer.getContext("2d", { alpha: false, desynchronized: true });
+      renderer.render(previewCtx, previewBuffer.width, previewBuffer.height, frame / fps, readParams(), frame, fps);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(previewBuffer, 0, 0, canvas.width, canvas.height);
+    }
     requestAnimationFrame(animate);
   }
 
@@ -512,6 +600,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       URL.revokeObjectURL(loadedVideo.objectUrl);
       loadedVideo = null;
     }
+    updatePreviewControlsState();
 
     progressEl.value = 0.05;
     setStatus(`Processing ${file.name} (${Math.round(file.size / 1024)} KB)...`, "info");
@@ -527,6 +616,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         canvas.width = videoSource.video.videoWidth;
         canvas.height = videoSource.video.videoHeight;
         document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+        previewTargetSeconds = 0;
+        previewFrameSeconds = 0;
+        syncPreviewTimeControl();
+        updatePreviewControlsState();
 
         setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
       } else {
@@ -535,6 +628,10 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         renderer.setImage(imageSource);
         if (typeof imageSource.close === "function") imageSource.close();
         loadedSourceType = "image";
+        previewTargetSeconds = 0;
+        previewFrameSeconds = 0;
+        syncPreviewTimeControl();
+        updatePreviewControlsState();
         setStatus(`Loaded image ${file.name}. Ready to export.`, "success");
       }
 
@@ -555,6 +652,28 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     applyPreset(presetSelect.value);
     progressEl.value = 0;
     setStatus(`Preset applied: ${presetSelect.value}`, "success");
+  });
+
+  document.getElementById("previewMode").addEventListener("change", () => {
+    if (isStillPreviewMode()) {
+      previewNeedsSeek = true;
+    }
+    updatePreviewControlsState();
+    progressEl.value = 0;
+  });
+
+  document.getElementById("previewScale").addEventListener("change", () => {
+    progressEl.value = 0;
+  });
+
+  document.getElementById("previewFps").addEventListener("input", () => {
+    progressEl.value = 0;
+  });
+
+  document.getElementById("previewTime").addEventListener("input", (event) => {
+    previewTargetSeconds = Number(event.target.value) || 0;
+    previewNeedsSeek = true;
+    progressEl.value = 0;
   });
 
   exportBtn.addEventListener("click", async () => {
@@ -604,6 +723,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
   setExportAvailability();
   initializePresets();
+  updatePreviewControlsState();
+  syncPreviewTimeControl();
   window.addEventListener("beforeunload", () => {
     if (loadedVideo?.objectUrl) {
       URL.revokeObjectURL(loadedVideo.objectUrl);

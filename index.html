@@ -32,6 +32,29 @@
           <label>Duration (s) <input id="duration" type="number" value="4" min="1" max="20" step="0.5" /></label>
         </div>
 
+        <div class="video-controls">
+          <label>Preview mode
+            <select id="previewMode">
+              <option value="still" selected>Still frame (recommended)</option>
+              <option value="playback">Playback</option>
+            </select>
+          </label>
+          <div class="row">
+            <label>Preview FPS <input id="previewFps" type="number" value="15" min="1" max="60" /></label>
+            <label>Preview scale
+              <select id="previewScale">
+                <option value="1">100%</option>
+                <option value="0.75">75%</option>
+                <option value="0.5" selected>50%</option>
+                <option value="0.33">33%</option>
+              </select>
+            </label>
+          </div>
+          <label>Preview frame (s)
+            <input id="previewTime" type="range" min="0" max="0" step="0.01" value="0" disabled />
+          </label>
+        </div>
+
         <button id="exportBtn">Export MP4</button>
         <div id="status" class="status">Load an image to begin.</div>
         <progress id="progress" max="1" value="0"></progress>
