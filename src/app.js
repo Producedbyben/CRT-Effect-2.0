@@ -7,6 +7,7 @@ const FALLBACK_PRESETS = {
     flicker: 0.5,
     chromaticAberration: 0.5,
     noise: 0.5,
+    pixelSize: 1,
   },
   "PVM/BVM": {
     scanlineStrength: 0.25,
@@ -16,6 +17,7 @@ const FALLBACK_PRESETS = {
     flicker: 0.12,
     chromaticAberration: 0.08,
     noise: 0.16,
+    pixelSize: 1,
   },
   Arcade: {
     scanlineStrength: 0.4,
@@ -25,6 +27,7 @@ const FALLBACK_PRESETS = {
     flicker: 0.2,
     chromaticAberration: 0.2,
     noise: 0.3,
+    pixelSize: 1,
   },
 };
 
@@ -50,9 +53,12 @@ class CRTRenderer {
     this.hasImage = false;
   }
 
-  setImage(img) {
-    this.sourceCanvas.width = img.naturalWidth || img.videoWidth || img.width;
-    this.sourceCanvas.height = img.naturalHeight || img.videoHeight || img.height;
+  setImage(img, sourceScale = 1) {
+    const inputWidth = img.naturalWidth || img.videoWidth || img.width;
+    const inputHeight = img.naturalHeight || img.videoHeight || img.height;
+    const scale = Math.max(0.1, Math.min(1, sourceScale || 1));
+    this.sourceCanvas.width = Math.max(1, Math.round(inputWidth * scale));
+    this.sourceCanvas.height = Math.max(1, Math.round(inputHeight * scale));
     const ctx = this.sourceCanvas.getContext("2d");
     ctx.clearRect(0, 0, this.sourceCanvas.width, this.sourceCanvas.height);
     ctx.drawImage(img, 0, 0);
@@ -122,6 +128,8 @@ class CRTRenderer {
     const ca = params.chromaticAberration;
     const scan = params.scanlineStrength;
     const mask = params.phosphorMask;
+    const pixelSize = Math.max(1, Number(params.pixelSize) || 1);
+    const pixelInfluence = 1 + (pixelSize - 1) * 0.22;
     const pixelStepX = width > 1 ? 1 / (width - 1) : 0;
     const pixelStepY = height > 1 ? 1 / (height - 1) : 0;
 
@@ -149,37 +157,42 @@ class CRTRenderer {
           continue;
         }
 
-        const edgeShift = ca * (0.0012 + r2 * 0.0045);
-        const ru = u + edgeShift * (0.7 + Math.abs(nx));
-        const gu = u;
-        const bu = u - edgeShift * (0.7 + Math.abs(nx));
+        const edgeShift = ca * (0.0012 + r2 * 0.0045) * (0.8 + (pixelSize - 1) * 0.22);
+        const qx = Math.floor((u * width) / pixelSize) * pixelSize + pixelSize * 0.5;
+        const qy = Math.floor((v * height) / pixelSize) * pixelSize + pixelSize * 0.5;
+        const qu = Math.max(0, Math.min(1, qx / width));
+        const qv = Math.max(0, Math.min(1, qy / height));
 
-        const red = this.sampleBilinear(srcData, width, height, ru, v, 0);
-        const green = this.sampleBilinear(srcData, width, height, gu, v, 1);
-        const blue = this.sampleBilinear(srcData, width, height, bu, v, 2);
+        const ru = qu + edgeShift * (0.7 + Math.abs(nx));
+        const gu = qu;
+        const bu = qu - edgeShift * (0.7 + Math.abs(nx));
+
+        const red = this.sampleBilinear(srcData, width, height, ru, qv, 0)
+        const green = this.sampleBilinear(srcData, width, height, gu, qv, 1)
+        const blue = this.sampleBilinear(srcData, width, height, bu, qv, 2)
 
         const redHoriz =
-          this.sampleBilinear(srcData, width, height, ru - pixelStepX, v, 0) * 0.5 +
-          this.sampleBilinear(srcData, width, height, ru + pixelStepX, v, 0) * 0.5;
+          this.sampleBilinear(srcData, width, height, ru - pixelStepX, qv, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru + pixelStepX, qv, 0) * 0.5;
         const greenHoriz =
-          this.sampleBilinear(srcData, width, height, gu - pixelStepX, v, 1) * 0.5 +
-          this.sampleBilinear(srcData, width, height, gu + pixelStepX, v, 1) * 0.5;
+          this.sampleBilinear(srcData, width, height, gu - pixelStepX, qv, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu + pixelStepX, qv, 1) * 0.5;
         const blueHoriz =
-          this.sampleBilinear(srcData, width, height, bu - pixelStepX, v, 2) * 0.5 +
-          this.sampleBilinear(srcData, width, height, bu + pixelStepX, v, 2) * 0.5;
+          this.sampleBilinear(srcData, width, height, bu - pixelStepX, qv, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu + pixelStepX, qv, 2) * 0.5;
 
         const redVert =
-          this.sampleBilinear(srcData, width, height, ru, v - pixelStepY, 0) * 0.5 +
-          this.sampleBilinear(srcData, width, height, ru, v + pixelStepY, 0) * 0.5;
+          this.sampleBilinear(srcData, width, height, ru, qv - pixelStepY, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru, qv + pixelStepY, 0) * 0.5;
         const greenVert =
-          this.sampleBilinear(srcData, width, height, gu, v - pixelStepY, 1) * 0.5 +
-          this.sampleBilinear(srcData, width, height, gu, v + pixelStepY, 1) * 0.5;
+          this.sampleBilinear(srcData, width, height, gu, qv - pixelStepY, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu, qv + pixelStepY, 1) * 0.5;
         const blueVert =
-          this.sampleBilinear(srcData, width, height, bu, v - pixelStepY, 2) * 0.5 +
-          this.sampleBilinear(srcData, width, height, bu, v + pixelStepY, 2) * 0.5;
+          this.sampleBilinear(srcData, width, height, bu, qv - pixelStepY, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu, qv + pixelStepY, 2) * 0.5;
 
         const luminance = Math.max(red, green, blue) / 255;
-        const bleed = (0.08 + params.bloom * 0.26 + mask * 0.08) * Math.pow(luminance, 0.75);
+        const bleed = (0.08 + params.bloom * 0.26 + mask * 0.08) * pixelInfluence * Math.pow(luminance, 0.75);
         const blend = Math.min(0.45, bleed);
 
         const triad = x % 3;
@@ -211,15 +224,15 @@ class CRTRenderer {
     if (bloom > 0) {
       outCtx.save();
       outCtx.globalCompositeOperation = "screen";
-      outCtx.globalAlpha = 0.16 + bloom * 0.34;
-      outCtx.filter = `blur(${0.8 + bloom * 5.6}px) brightness(${1 + bloom * 0.55})`;
+      outCtx.globalAlpha = Math.min(0.8, (0.16 + bloom * 0.34) * pixelInfluence);
+      outCtx.filter = `blur(${(0.8 + bloom * 5.6) * (1 + (pixelSize - 1) * 0.12)}px) brightness(${1 + bloom * 0.55})`;
       outCtx.drawImage(this.workCanvas, 0, 0);
       outCtx.restore();
 
       outCtx.save();
       outCtx.globalCompositeOperation = "lighter";
-      outCtx.globalAlpha = 0.08 + bloom * 0.24;
-      outCtx.filter = `blur(${0.4 + bloom * 2.4}px)`;
+      outCtx.globalAlpha = Math.min(0.7, (0.08 + bloom * 0.24) * pixelInfluence);
+      outCtx.filter = `blur(${(0.4 + bloom * 2.4) * (1 + (pixelSize - 1) * 0.1)}px)`;
       outCtx.drawImage(this.workCanvas, 1, 0);
       outCtx.drawImage(this.workCanvas, -1, 0);
       outCtx.restore();
@@ -443,11 +456,13 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     "flicker",
     "chromaticAberration",
     "noise",
+    "pixelSize",
   ];
 
   let hasLoadedSource = false;
   let loadedSourceType = "image";
   let loadedVideo = null;
+  let loadedImage = null;
   const presets = { ...FALLBACK_PRESETS };
   let start = performance.now();
   let previewFrameSeconds = 0;
@@ -476,6 +491,20 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
   function getPreviewScale() {
     return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
+  }
+
+  function getSourceScale() {
+    return Math.max(0.1, Number(document.getElementById("sourceScale").value) || 1);
+  }
+
+  function refreshRendererSource() {
+    if (loadedSourceType === "video" && loadedVideo?.video) {
+      renderer.setImage(loadedVideo.video, getSourceScale());
+      return;
+    }
+    if (loadedSourceType === "image" && loadedImage) {
+      renderer.setImage(loadedImage, getSourceScale());
+    }
   }
 
   function updatePreviewControlsState() {
@@ -523,6 +552,11 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         document.getElementById(id).value = targetValues[id];
       }
     }
+    document.getElementById("sourceScale").value = "1";
+    refreshRendererSource();
+    if (loadedSourceType === "video" && isStillPreviewMode()) {
+      previewNeedsSeek = true;
+    }
     progressEl.value = 0;
     setStatus("Parameters reset to defaults.", "success");
   }
@@ -536,8 +570,12 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (loadedVideo?.objectUrl) {
       URL.revokeObjectURL(loadedVideo.objectUrl);
     }
+    if (loadedImage && typeof loadedImage.close === "function") {
+      loadedImage.close();
+    }
 
     loadedVideo = null;
+    loadedImage = null;
     loadedSourceType = "image";
     hasLoadedSource = false;
     renderer.hasImage = false;
@@ -670,7 +708,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
           seekVideo(video, previewTargetSeconds)
             .then(() => {
               previewFrameSeconds = previewTargetSeconds;
-              renderer.setImage(video);
+              renderer.setImage(video, getSourceScale());
             })
             .catch((error) => {
               previewNeedsSeek = true;
@@ -682,7 +720,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         const minInterval = 1000 / previewFps;
         if (now - lastPreviewTick >= minInterval) {
           lastPreviewTick = now;
-          renderer.setImage(video);
+          renderer.setImage(video, getSourceScale());
           previewFrameSeconds = video.currentTime;
           previewTargetSeconds = previewFrameSeconds;
           document.getElementById("previewTime").value = previewFrameSeconds.toFixed(3);
@@ -722,7 +760,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       if (file.type.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(file.name)) {
         const videoSource = await loadVideoFromFile(file);
         progressEl.value = 0.4;
-        renderer.setImage(videoSource.video);
+        renderer.setImage(videoSource.video, getSourceScale());
         loadedVideo = videoSource;
         loadedSourceType = "video";
 
@@ -739,8 +777,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       } else {
         const imageSource = await loadImageFromFile(file);
         progressEl.value = 0.4;
-        renderer.setImage(imageSource);
-        if (typeof imageSource.close === "function") imageSource.close();
+        loadedImage = imageSource;
+        renderer.setImage(imageSource, getSourceScale());
         loadedSourceType = "image";
         previewTargetSeconds = 0;
         previewFrameSeconds = 0;
@@ -781,6 +819,14 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     progressEl.value = 0;
   });
 
+  document.getElementById("sourceScale").addEventListener("change", () => {
+    refreshRendererSource();
+    if (loadedSourceType === "video" && isStillPreviewMode()) {
+      previewNeedsSeek = true;
+    }
+    progressEl.value = 0;
+  });
+
   document.getElementById("previewFps").addEventListener("input", () => {
     progressEl.value = 0;
   });
@@ -815,7 +861,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         beforeRenderFrame: loadedSourceType === "video" && loadedVideo
           ? async (t) => {
               await seekVideo(loadedVideo.video, t);
-              renderer.setImage(loadedVideo.video);
+              renderer.setImage(loadedVideo.video, getSourceScale());
             }
           : null,
         onProgress: (value, current, total) => {
@@ -867,6 +913,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   window.addEventListener("beforeunload", () => {
     if (loadedVideo?.objectUrl) {
       URL.revokeObjectURL(loadedVideo.objectUrl);
+    }
+    if (loadedImage && typeof loadedImage.close === "function") {
+      loadedImage.close();
     }
   });
 
