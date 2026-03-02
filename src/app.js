@@ -35,6 +35,13 @@ function seededNoise(x, y, frame) {
   return v - Math.floor(v);
 }
 
+const BAYER_4X4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+
 class CRTRenderer {
   constructor() {
     this.sourceCanvas = document.createElement("canvas");
@@ -111,10 +118,12 @@ class CRTRenderer {
     const srcData = srcPixels.data;
     const dstData = outPixels.data;
 
-    const barrel = params.barrelDistortion;
+    const barrel = Math.max(-0.8, Math.min(0.8, params.barrelDistortion));
     const ca = params.chromaticAberration;
     const scan = params.scanlineStrength;
     const mask = params.phosphorMask;
+    const pixelStepX = width > 1 ? 1 / (width - 1) : 0;
+    const pixelStepY = height > 1 ? 1 / (height - 1) : 0;
 
     for (let y = 0; y < height; y++) {
       const ny = (y / (height - 1)) * 2 - 1;
@@ -124,7 +133,8 @@ class CRTRenderer {
       for (let x = 0; x < width; x++) {
         const nx = (x / (width - 1)) * 2 - 1;
         const r2 = nx * nx + ny * ny;
-        const warp = 1 + barrel * (0.28 + 0.72 * r2);
+        const warpCurve = 0.22 + 0.78 * r2;
+        const warp = Math.max(0.35, 1 + barrel * warpCurve);
         const srcNx = nx / warp;
         const srcNy = ny / warp;
         const u = srcNx * 0.5 + 0.5;
@@ -148,6 +158,30 @@ class CRTRenderer {
         const green = this.sampleBilinear(srcData, width, height, gu, v, 1);
         const blue = this.sampleBilinear(srcData, width, height, bu, v, 2);
 
+        const redHoriz =
+          this.sampleBilinear(srcData, width, height, ru - pixelStepX, v, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru + pixelStepX, v, 0) * 0.5;
+        const greenHoriz =
+          this.sampleBilinear(srcData, width, height, gu - pixelStepX, v, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu + pixelStepX, v, 1) * 0.5;
+        const blueHoriz =
+          this.sampleBilinear(srcData, width, height, bu - pixelStepX, v, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu + pixelStepX, v, 2) * 0.5;
+
+        const redVert =
+          this.sampleBilinear(srcData, width, height, ru, v - pixelStepY, 0) * 0.5 +
+          this.sampleBilinear(srcData, width, height, ru, v + pixelStepY, 0) * 0.5;
+        const greenVert =
+          this.sampleBilinear(srcData, width, height, gu, v - pixelStepY, 1) * 0.5 +
+          this.sampleBilinear(srcData, width, height, gu, v + pixelStepY, 1) * 0.5;
+        const blueVert =
+          this.sampleBilinear(srcData, width, height, bu, v - pixelStepY, 2) * 0.5 +
+          this.sampleBilinear(srcData, width, height, bu, v + pixelStepY, 2) * 0.5;
+
+        const luminance = Math.max(red, green, blue) / 255;
+        const bleed = (0.08 + params.bloom * 0.26 + mask * 0.08) * Math.pow(luminance, 0.75);
+        const blend = Math.min(0.45, bleed);
+
         const triad = x % 3;
         const boost = 1 + mask * 0.52;
         const dim = 1 - mask * 0.32;
@@ -155,9 +189,15 @@ class CRTRenderer {
         const gMask = triad === 1 ? boost : dim;
         const bMask = triad === 2 ? boost : dim;
 
-        dstData[outIndex] = Math.min(255, red * scanlineGain * rMask);
-        dstData[outIndex + 1] = Math.min(255, green * scanlineGain * gMask);
-        dstData[outIndex + 2] = Math.min(255, blue * scanlineGain * bMask);
+        const dither = (BAYER_4X4[y & 3][x & 3] / 15 - 0.5) * (1.4 + params.noise * 2.2);
+
+        const redSoft = red * (1 - blend) + (redHoriz * 0.62 + redVert * 0.38) * blend;
+        const greenSoft = green * (1 - blend) + (greenHoriz * 0.62 + greenVert * 0.38) * blend;
+        const blueSoft = blue * (1 - blend) + (blueHoriz * 0.62 + blueVert * 0.38) * blend;
+
+        dstData[outIndex] = Math.min(255, Math.max(0, redSoft * scanlineGain * rMask + dither));
+        dstData[outIndex + 1] = Math.min(255, Math.max(0, greenSoft * scanlineGain * gMask + dither));
+        dstData[outIndex + 2] = Math.min(255, Math.max(0, blueSoft * scanlineGain * bMask + dither));
         dstData[outIndex + 3] = 255;
       }
     }
@@ -170,13 +210,22 @@ class CRTRenderer {
     const bloom = params.bloom;
     if (bloom > 0) {
       outCtx.save();
-      outCtx.globalAlpha = bloom * 0.38;
-      outCtx.filter = `blur(${1 + bloom * 7}px) brightness(${1 + bloom * 0.35})`;
-      outCtx.drawImage(outCtx.canvas, 0, 0);
+      outCtx.globalCompositeOperation = "screen";
+      outCtx.globalAlpha = 0.16 + bloom * 0.34;
+      outCtx.filter = `blur(${0.8 + bloom * 5.6}px) brightness(${1 + bloom * 0.55})`;
+      outCtx.drawImage(this.workCanvas, 0, 0);
+      outCtx.restore();
+
+      outCtx.save();
+      outCtx.globalCompositeOperation = "lighter";
+      outCtx.globalAlpha = 0.08 + bloom * 0.24;
+      outCtx.filter = `blur(${0.4 + bloom * 2.4}px)`;
+      outCtx.drawImage(this.workCanvas, 1, 0);
+      outCtx.drawImage(this.workCanvas, -1, 0);
       outCtx.restore();
     }
 
-    const vignette = Math.min(0.35, 0.08 + barrel * 0.22);
+    const vignette = Math.min(0.35, 0.08 + Math.abs(barrel) * 0.22);
     const grad = outCtx.createRadialGradient(
       width * 0.5,
       height * 0.5,
@@ -245,7 +294,7 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }) {
+async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress }) {
   if (!("VideoEncoder" in window)) {
     throw new Error("WebCodecs VideoEncoder is unavailable in this browser/context.");
   }
@@ -254,7 +303,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
   const width = canvas.width;
   const height = canvas.height;
   const totalFrames = Math.max(1, Math.floor(duration * fps));
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
@@ -270,17 +319,31 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     },
   });
 
-  encoder.configure({
-    codec: "avc1.42001f",
-    width,
-    height,
-    framerate: fps,
-    bitrate: 5_000_000,
-    latencyMode: "quality",
-  });
+  try {
+    encoder.configure({
+      codec: "avc1.42001f",
+      width,
+      height,
+      framerate: fps,
+      bitrate: 5_000_000,
+      latencyMode: "quality",
+      hardwareAcceleration: "prefer-hardware",
+    });
+  } catch (error) {
+    console.warn("Hardware-accelerated encoder config unavailable; falling back.", error);
+    encoder.configure({
+      codec: "avc1.42001f",
+      width,
+      height,
+      framerate: fps,
+      bitrate: 5_000_000,
+      latencyMode: "quality",
+    });
+  }
 
   for (let frame = 0; frame < totalFrames; frame++) {
     const t = frame / fps;
+    if (beforeRenderFrame) await beforeRenderFrame(t, frame, fps);
     renderer.render(ctx, width, height, t, params, frame, fps);
     const videoFrame = new VideoFrame(canvas, {
       timestamp: Math.round((frame * 1_000_000) / fps),
@@ -305,7 +368,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
 (function boot() {
   const renderer = new CRTRenderer();
   const canvas = document.getElementById("previewCanvas");
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
   const statusEl = document.getElementById("status");
   const progressEl = document.getElementById("progress");
   const exportBtn = document.getElementById("exportBtn");
@@ -321,7 +384,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     "noise",
   ];
 
-  let hasLoadedImage = false;
+  let hasLoadedSource = false;
+  let loadedSourceType = "image";
+  let loadedVideo = null;
   const presets = { ...FALLBACK_PRESETS };
   let start = performance.now();
 
@@ -331,7 +396,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
   }
 
   function setExportAvailability() {
-    exportBtn.disabled = !hasLoadedImage;
+    exportBtn.disabled = !hasLoadedSource;
   }
 
   function readParams() {
@@ -393,10 +458,48 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     return img;
   }
 
+  function waitForVideoEvent(video, eventName) {
+    return new Promise((resolve) => {
+      const handler = () => {
+        video.removeEventListener(eventName, handler);
+        resolve();
+      };
+      video.addEventListener(eventName, handler, { once: true });
+    });
+  }
+
+  async function loadVideoFromFile(file) {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+    video.preload = "auto";
+    const objectUrl = URL.createObjectURL(file);
+    video.src = objectUrl;
+    video.load();
+    await waitForVideoEvent(video, "loadedmetadata");
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      throw new Error("Video metadata is invalid or duration is unavailable.");
+    }
+    await video.play().catch(() => {});
+    return { video, objectUrl };
+  }
+
+  async function seekVideo(video, timeSeconds) {
+    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, video.duration - 0.000001)));
+    if (Math.abs(video.currentTime - clamped) < 0.0005) return;
+    video.currentTime = clamped;
+    await waitForVideoEvent(video, "seeked");
+  }
+
   function animate(now) {
     const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
     const elapsed = (now - start) / 1000;
     const frame = Math.floor(elapsed * fps);
+    if (loadedSourceType === "video" && loadedVideo?.video) {
+      renderer.setImage(loadedVideo.video);
+    }
     renderer.render(ctx, canvas.width, canvas.height, frame / fps, readParams(), frame, fps);
     requestAnimationFrame(animate);
   }
@@ -405,24 +508,45 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
     const file = event.target.files?.[0];
     if (!file) return;
 
+    if (loadedVideo?.objectUrl) {
+      URL.revokeObjectURL(loadedVideo.objectUrl);
+      loadedVideo = null;
+    }
+
     progressEl.value = 0.05;
     setStatus(`Processing ${file.name} (${Math.round(file.size / 1024)} KB)...`, "info");
 
     try {
-      const imageSource = await loadImageFromFile(file);
-      progressEl.value = 0.4;
-      renderer.setImage(imageSource);
-      if (typeof imageSource.close === "function") imageSource.close();
+      if (file.type.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(file.name)) {
+        const videoSource = await loadVideoFromFile(file);
+        progressEl.value = 0.4;
+        renderer.setImage(videoSource.video);
+        loadedVideo = videoSource;
+        loadedSourceType = "video";
+
+        canvas.width = videoSource.video.videoWidth;
+        canvas.height = videoSource.video.videoHeight;
+        document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+
+        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
+      } else {
+        const imageSource = await loadImageFromFile(file);
+        progressEl.value = 0.4;
+        renderer.setImage(imageSource);
+        if (typeof imageSource.close === "function") imageSource.close();
+        loadedSourceType = "image";
+        setStatus(`Loaded image ${file.name}. Ready to export.`, "success");
+      }
+
       progressEl.value = 1;
-      hasLoadedImage = true;
+      hasLoadedSource = true;
       setExportAvailability();
       start = performance.now();
-      setStatus(`Loaded ${file.name}. Ready to export.`, "success");
     } catch (error) {
-      hasLoadedImage = false;
+      hasLoadedSource = false;
       progressEl.value = 0;
       setExportAvailability();
-      setStatus(`Couldn't load image: ${error.message}`, "error");
+      setStatus(`Couldn't load media: ${error.message}`, "error");
       console.error(error);
     }
   });
@@ -434,8 +558,8 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
   });
 
   exportBtn.addEventListener("click", async () => {
-    if (!hasLoadedImage) {
-      setStatus("Load an image before exporting.", "warn");
+    if (!hasLoadedSource) {
+      setStatus("Load an image or video before exporting.", "warn");
       return;
     }
 
@@ -443,12 +567,21 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
       exportBtn.disabled = true;
       progressEl.value = 0;
       setStatus("Preparing export...", "info");
+      const fps = Math.max(1, Number(document.getElementById("fps").value) || 60);
+      const duration = Math.max(0.5, Number(document.getElementById("duration").value) || 4);
+
       await exportMp4({
         canvas,
         renderer,
         params: readParams(),
-        fps: Math.max(1, Number(document.getElementById("fps").value) || 60),
-        duration: Math.max(0.5, Number(document.getElementById("duration").value) || 4),
+        fps,
+        duration,
+        beforeRenderFrame: loadedSourceType === "video" && loadedVideo
+          ? async (t) => {
+              await seekVideo(loadedVideo.video, t);
+              renderer.setImage(loadedVideo.video);
+            }
+          : null,
         onProgress: (value, current, total) => {
           progressEl.value = value;
           setStatus(`Encoding frame ${current}/${total}`, "info");
@@ -471,6 +604,13 @@ async function exportMp4({ canvas, renderer, params, fps, duration, onProgress }
 
   setExportAvailability();
   initializePresets();
-  setStatus("Load an image to begin.", "info");
+  window.addEventListener("beforeunload", () => {
+    if (loadedVideo?.objectUrl) {
+      URL.revokeObjectURL(loadedVideo.objectUrl);
+    }
+  });
+
+
+  setStatus("Load an image or video (MP4/WebM/MOV/etc.) to begin.", "info");
   requestAnimationFrame(animate);
 })();
