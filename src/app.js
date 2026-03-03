@@ -1,75 +1,11 @@
-const FALLBACK_PRESETS = {
-  "Consumer TV": {
-    scanlineStrength: 0.5,
-    phosphorMask: 0.5,
-    barrelDistortion: 0,
-    bloom: 0.5,
-    flicker: 0.22,
-    chromaticAberration: 0.5,
-    noise: 0.5,
-    pixelSize: 1,
-  },
-  "PVM/BVM": {
-    scanlineStrength: 0.25,
-    phosphorMask: 0.6,
-    barrelDistortion: 0.08,
-    bloom: 0.2,
-    flicker: 0.12,
-    chromaticAberration: 0.08,
-    noise: 0.16,
-    pixelSize: 1,
-  },
-  Arcade: {
-    scanlineStrength: 0.4,
-    phosphorMask: 0.45,
-    barrelDistortion: 0.12,
-    bloom: 0.55,
-    flicker: 0.2,
-    chromaticAberration: 0.2,
-    noise: 0.3,
-    pixelSize: 1,
-  },
-  "Trinitron RGB Monitor": {
-    scanlineStrength: 0.2,
-    phosphorMask: 0.72,
-    barrelDistortion: 0.04,
-    bloom: 0.16,
-    flicker: 0.03,
-    chromaticAberration: 0.06,
-    noise: 0.05,
-    pixelSize: 1,
-  },
-  "VHS Composite": {
-    scanlineStrength: 0.48,
-    phosphorMask: 0.28,
-    barrelDistortion: 0.26,
-    bloom: 0.68,
-    flicker: 0.16,
-    chromaticAberration: 0.54,
-    noise: 0.34,
-    pixelSize: 2,
-  },
-  "Portable CRT": {
-    scanlineStrength: 0.56,
-    phosphorMask: 0.34,
-    barrelDistortion: 0.32,
-    bloom: 0.34,
-    flicker: 0.18,
-    chromaticAberration: 0.26,
-    noise: 0.24,
-    pixelSize: 2,
-  },
-  "Late-Night Broadcast": {
-    scanlineStrength: 0.35,
-    phosphorMask: 0.42,
-    barrelDistortion: 0.16,
-    bloom: 0.5,
-    flicker: 0.12,
-    chromaticAberration: 0.22,
-    noise: 0.2,
-    pixelSize: 1,
-  },
-};
+import { PARAM_IDS, PRESETS } from "./core/params.js";
+
+
+
+
+
+
+
 
 const MP4_MUXER_CDN = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.2/build/mp4-muxer.mjs";
 
@@ -577,22 +513,13 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
   const imageInput = document.getElementById("imageInput");
   const presetSelect = document.getElementById("presetSelect");
 
-  const controlIds = [
-    "scanlineStrength",
-    "phosphorMask",
-    "barrelDistortion",
-    "bloom",
-    "flicker",
-    "chromaticAberration",
-    "noise",
-    "pixelSize",
-  ];
+  const controlIds = [...PARAM_IDS];
 
   let hasLoadedSource = false;
   let loadedSourceType = "image";
   let loadedVideo = null;
   let loadedImage = null;
-  const presets = { ...FALLBACK_PRESETS };
+  const presets = { ...PRESETS };
   let start = performance.now();
   let previewFrameSeconds = 0;
   let previewTargetSeconds = 0;
@@ -943,29 +870,79 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
       try {
         return await createImageBitmap(file);
       } catch (error) {
-        console.warn("createImageBitmap failed; falling back to Image.decode", error);
+        console.warn("createImageBitmap failed; falling back to Image() load", error);
       }
     }
 
-    const img = new Image();
     const objectUrl = URL.createObjectURL(file);
-    img.src = objectUrl;
-    try {
-      await img.decode();
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
+    const img = new Image();
+
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        img.onload = null;
+        img.onerror = null;
+      };
+
+      img.onload = () => {
+        cleanup();
+        resolve();
+      };
+      img.onerror = () => {
+        cleanup();
+        reject(new Error("The selected image format could not be decoded by this browser."));
+      };
+      img.src = objectUrl;
+    });
+
+    URL.revokeObjectURL(objectUrl);
     return img;
   }
 
-  function waitForVideoEvent(video, eventName) {
-    return new Promise((resolve) => {
-      const handler = () => {
-        video.removeEventListener(eventName, handler);
-        resolve();
+  function waitForVideoEvent(video, eventName, timeoutMs = 4000) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+
+      const cleanup = () => {
+        video.removeEventListener(eventName, onEvent);
+        video.removeEventListener("error", onError);
+        if (timer) clearTimeout(timer);
       };
-      video.addEventListener(eventName, handler, { once: true });
+
+      const finish = (result, isError = false) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (isError) reject(result);
+        else resolve(result);
+      };
+
+      const onEvent = () => finish();
+      const onError = () => finish(video.error || new Error(`Video event failed: ${eventName}`), true);
+      const timer = timeoutMs > 0 ? setTimeout(() => finish(), timeoutMs) : null;
+
+      video.addEventListener(eventName, onEvent, { once: true });
+      video.addEventListener("error", onError, { once: true });
     });
+  }
+
+  function getSafeVideoDuration(video) {
+    const duration = Number(video && video.duration);
+    return Number.isFinite(duration) && duration > 0 ? duration : 4;
+  }
+
+  async function ensureVideoFrameReady(video) {
+    if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) return;
+
+    const timeoutAt = performance.now() + 3000;
+    while (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      await Promise.race([
+        waitForVideoEvent(video, "loadeddata"),
+        waitForVideoEvent(video, "canplay"),
+        waitForVideoEvent(video, "timeupdate"),
+        new Promise((resolve) => setTimeout(resolve, 150)),
+      ]);
+      if (performance.now() >= timeoutAt) break;
+    }
   }
 
   async function loadVideoFromFile(file) {
@@ -973,23 +950,36 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
     video.muted = true;
     video.loop = true;
     video.playsInline = true;
-    video.crossOrigin = "anonymous";
     video.preload = "auto";
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
     video.load();
     await waitForVideoEvent(video, "loadedmetadata");
-    if (!Number.isFinite(video.duration) || video.duration <= 0) {
-      throw new Error("Video metadata is invalid or duration is unavailable.");
+
+    try {
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        await Promise.race([playPromise, new Promise((resolve) => setTimeout(resolve, 250))]);
+      }
+    } catch (error) {
+      // Ignore autoplay restrictions; we only need decode readiness.
+    } finally {
+      video.pause();
     }
+
+    await ensureVideoFrameReady(video);
     return { video, objectUrl };
   }
 
   async function seekVideo(video, timeSeconds) {
-    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, video.duration - 0.000001)));
-    if (Math.abs(video.currentTime - clamped) < 0.0005) return;
+    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, getSafeVideoDuration(video) - 0.000001)));
+    if (Math.abs(video.currentTime - clamped) < 0.0005) {
+      await ensureVideoFrameReady(video);
+      return;
+    }
     video.currentTime = clamped;
     await waitForVideoEvent(video, "seeked");
+    await ensureVideoFrameReady(video);
   }
 
   function animate(now) {
@@ -1072,7 +1062,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
 
         canvas.width = videoSource.video.videoWidth;
         canvas.height = videoSource.video.videoHeight;
-        document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+        document.getElementById("duration").value = Math.max(0.5, getSafeVideoDuration(videoSource.video)).toFixed(2);
         previewTargetSeconds = 0;
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
@@ -1081,7 +1071,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
         syncVideoPlaybackState();
         markPreviewDirty();
 
-        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
+        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${getSafeVideoDuration(videoSource.video).toFixed(2)}s). Ready to export.`, "success");
       } else {
         const imageSource = await loadImageFromFile(file);
         progressEl.value = 0.4;
