@@ -426,13 +426,13 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
   const totalFrames = Math.max(1, Math.floor(duration * fps));
 
   const stream = canvas.captureStream(fps);
-  const sourceVideo = loadedSourceType === "video" ? loadedVideo && loadedVideo.video : null;
+  const sourceVideo = loadedSourceType === "video" && loadedVideo ? loadedVideo.video : null;
   const wantsAudio = includeAudio && !!sourceVideo;
 
   if (wantsAudio) {
     try {
       const mediaStream = (sourceVideo.captureStream ? sourceVideo.captureStream() : null) || (sourceVideo.mozCaptureStream ? sourceVideo.mozCaptureStream() : null);
-      const audioTrack = (mediaStream && mediaStream.getAudioTracks ? mediaStream.getAudioTracks()[0] : null);
+      const audioTrack = mediaStream && mediaStream.getAudioTracks ? mediaStream.getAudioTracks()[0] : null;
       if (audioTrack) {
         stream.addTrack(audioTrack);
       }
@@ -585,7 +585,8 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
     if (!root) return { getValue: () => undefined, setValue: () => {}, setDisabled: () => {} };
 
     const buttons = Array.from(root.querySelectorAll("button[data-value]"));
-    let current = (buttons.find((btn) => btn.dataset.selected === "true") || {}).dataset && (buttons.find((btn) => btn.dataset.selected === "true") || {}).dataset.value ? (buttons.find((btn) => btn.dataset.selected === "true") || {}).dataset.value : (buttons[0] ? buttons[0].dataset.value : undefined);
+    const selectedButton = buttons.find((btn) => btn.dataset.selected === "true");
+    let current = selectedButton ? selectedButton.dataset.value : (buttons[0] ? buttons[0].dataset.value : undefined);
 
     const setSelectedVisual = () => {
       for (const btn of buttons) {
@@ -715,7 +716,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
 
   function syncPreviewTimeControl() {
     const previewTime = document.getElementById("previewTime");
-    const max = loadedVideo && loadedVideo.video ? Math.max(0, getSafeVideoDuration(loadedVideo.video) - 0.001) : 0;
+    const max = loadedVideo && loadedVideo.video && loadedVideo.video.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
     previewTime.max = max.toFixed(3);
     previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
     previewFrameSeconds = previewTargetSeconds;
