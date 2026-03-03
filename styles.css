@@ -107,3 +107,51 @@ progress {
 .actions button {
   margin-top: 0;
 }
+
+
+.range-control {
+  display: grid;
+  grid-template-columns: 1fr 84px;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.range-number {
+  width: 100%;
+}
+
+.selection-box {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+}
+
+.selection-box-wrap {
+  flex-wrap: wrap;
+}
+
+.selection-box button {
+  margin: 0;
+  padding: 0.42rem 0.5rem;
+  font-size: 0.8rem;
+  background: #212121;
+  border-color: #3a3a3a;
+}
+
+.selection-box button[data-selected="true"] {
+  background: #375c95;
+  border-color: #5b82c1;
+}
+
+.selection-box[data-disabled="true"] button {
+  opacity: 0.5;
+}
+
+.selection-empty {
+  font-size: 0.82rem;
+  color: #aaaaaa;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid #343434;
+  border-radius: 6px;
+  background: #202020;
+}

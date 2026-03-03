@@ -516,6 +516,105 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   let isExporting = false;
   let previewDirty = true;
 
+  function setupRangeWithNumber(id) {
+    const slider = document.getElementById(id);
+    if (!slider) return;
+    const wrapper = slider.closest(".range-control");
+    if (!wrapper) return;
+
+    const numericInput = document.createElement("input");
+    numericInput.type = "number";
+    numericInput.className = "range-number";
+    numericInput.min = slider.min;
+    numericInput.max = slider.max;
+    numericInput.step = slider.step || "any";
+    numericInput.value = slider.value;
+    numericInput.setAttribute("aria-label", `${id} numeric value`);
+    wrapper.appendChild(numericInput);
+
+    const syncToNumber = () => {
+      numericInput.value = slider.value;
+      numericInput.disabled = slider.disabled;
+    };
+
+    const clampToRange = (value) => {
+      const min = Number(slider.min);
+      const max = Number(slider.max);
+      let next = Number(value);
+      if (!Number.isFinite(next)) return Number(slider.value);
+      if (Number.isFinite(min)) next = Math.max(min, next);
+      if (Number.isFinite(max)) next = Math.min(max, next);
+      return next;
+    };
+
+    numericInput.addEventListener("input", () => {
+      const next = clampToRange(numericInput.value);
+      slider.value = String(next);
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    numericInput.addEventListener("change", () => {
+      const next = clampToRange(numericInput.value);
+      slider.value = String(next);
+      numericInput.value = slider.value;
+      slider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    slider.addEventListener("input", syncToNumber);
+    slider.addEventListener("change", syncToNumber);
+    slider.__syncRangeNumber = syncToNumber;
+    syncToNumber();
+  }
+
+  function setupSelectionBox(id, { onChange, valueParser = (value) => value, disabledWhen } = {}) {
+    const root = document.getElementById(id);
+    if (!root) return { getValue: () => undefined, setValue: () => {}, setDisabled: () => {} };
+
+    const buttons = Array.from(root.querySelectorAll("button[data-value]"));
+    let current = buttons.find((btn) => btn.dataset.selected === "true")?.dataset.value ?? buttons[0]?.dataset.value;
+
+    const setSelectedVisual = () => {
+      for (const btn of buttons) {
+        const active = btn.dataset.value === current;
+        btn.dataset.selected = active ? "true" : "false";
+        btn.setAttribute("aria-checked", active ? "true" : "false");
+      }
+    };
+
+    const setDisabled = (disabled) => {
+      root.dataset.disabled = disabled ? "true" : "false";
+      for (const btn of buttons) {
+        btn.disabled = !!disabled;
+      }
+    };
+
+    const setValue = (value, { silent = false } = {}) => {
+      const next = String(value);
+      if (!buttons.some((btn) => btn.dataset.value === next)) return;
+      current = next;
+      setSelectedVisual();
+      if (!silent) onChange?.(valueParser(current));
+    };
+
+    for (const btn of buttons) {
+      btn.type = "button";
+      btn.setAttribute("role", "radio");
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        setValue(btn.dataset.value);
+      });
+    }
+
+    setSelectedVisual();
+    if (typeof disabledWhen === "boolean") setDisabled(disabledWhen);
+
+    return {
+      getValue: () => valueParser(current),
+      setValue: (value, options) => setValue(value, options),
+      setDisabled,
+    };
+  }
+
   function setStatus(message, mode = "info") {
     statusEl.textContent = message;
     statusEl.dataset.mode = mode;
@@ -528,20 +627,26 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     imageInput.disabled = isExporting;
   }
 
+  let previewModeControl;
+  let previewScaleControl;
+  let sourceScaleControl;
+  let previewMaxPixelsControl;
+  let presetControl;
+
   function isStillPreviewMode() {
-    return document.getElementById("previewMode").value === "still";
+    return previewModeControl?.getValue() === "still";
   }
 
   function getPreviewScale() {
-    return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
+    return Math.max(0.1, Number(previewScaleControl?.getValue()) || 1);
   }
 
   function getSourceScale() {
-    return Math.max(0.1, Number(document.getElementById("sourceScale").value) || 1);
+    return Math.max(0.1, Number(sourceScaleControl?.getValue()) || 1);
   }
 
   function getPreviewMaxPixels() {
-    return Math.max(0, Number(document.getElementById("previewMaxPixels").value) || 0);
+    return Math.max(0, Number(previewMaxPixelsControl?.getValue()) || 0);
   }
 
   function markPreviewDirty() {
@@ -584,6 +689,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
     previewTime.disabled = !isVideo;
     previewFps.disabled = !isVideo || stillMode;
+    previewModeControl?.setDisabled(!isVideo);
   }
 
   function syncPreviewTimeControl() {
@@ -593,6 +699,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
     previewFrameSeconds = previewTargetSeconds;
     previewTime.value = previewTargetSeconds.toFixed(3);
+    previewTime.__syncRangeNumber?.();
     previewNeedsSeek = loadedSourceType === "video";
   }
 
@@ -618,10 +725,12 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     const targetValues = defaultParamValues || readParams();
     for (const id of controlIds) {
       if (typeof targetValues[id] === "number") {
-        document.getElementById(id).value = targetValues[id];
+        const slider = document.getElementById(id);
+        slider.value = targetValues[id];
+        slider.__syncRangeNumber?.();
       }
     }
-    document.getElementById("sourceScale").value = "1";
+    sourceScaleControl?.setValue("1", { silent: true });
     refreshRendererSource();
     if (loadedSourceType === "video" && isStillPreviewMode()) {
       previewNeedsSeek = true;
@@ -681,7 +790,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (!values) return;
     for (const id of controlIds) {
       if (typeof values[id] === "number") {
-        document.getElementById(id).value = values[id];
+        const slider = document.getElementById(id);
+        slider.value = values[id];
+        slider.__syncRangeNumber?.();
       }
     }
   }
@@ -691,23 +802,35 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     presetSelect.innerHTML = "";
 
     if (names.length === 0) {
-      const opt = document.createElement("option");
-      opt.textContent = "No presets available";
-      opt.disabled = true;
-      opt.selected = true;
-      presetSelect.appendChild(opt);
+      const message = document.createElement("div");
+      message.className = "selection-empty";
+      message.textContent = "No presets available";
+      presetSelect.appendChild(message);
       return;
     }
 
     for (const name of names) {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      presetSelect.appendChild(opt);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.value = name;
+      button.textContent = name;
+      if (name === "Consumer TV") {
+        button.dataset.selected = "true";
+      }
+      presetSelect.appendChild(button);
     }
 
+    presetControl = setupSelectionBox("presetSelect", {
+      onChange: (name) => {
+        applyPreset(name);
+        markPreviewDirty();
+        progressEl.value = 0;
+        setStatus(`Preset applied: ${name}`, "success");
+      },
+    });
+
     const defaultPreset = presets["Consumer TV"] ? "Consumer TV" : names[0];
-    presetSelect.value = defaultPreset;
+    presetControl.setValue(defaultPreset, { silent: true });
     applyPreset(defaultPreset);
   }
 
@@ -880,41 +1003,6 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     }
   });
 
-  presetSelect.addEventListener("change", () => {
-    applyPreset(presetSelect.value);
-    markPreviewDirty();
-    progressEl.value = 0;
-    setStatus(`Preset applied: ${presetSelect.value}`, "success");
-  });
-
-  document.getElementById("previewMode").addEventListener("change", () => {
-    if (isStillPreviewMode()) {
-      previewNeedsSeek = true;
-    }
-    updatePreviewControlsState();
-    syncVideoPlaybackState();
-    markPreviewDirty();
-    progressEl.value = 0;
-  });
-
-  document.getElementById("previewScale").addEventListener("change", () => {
-    markPreviewDirty();
-    progressEl.value = 0;
-  });
-
-  document.getElementById("sourceScale").addEventListener("change", () => {
-    refreshRendererSource();
-    if (loadedSourceType === "video" && isStillPreviewMode()) {
-      previewNeedsSeek = true;
-    }
-    progressEl.value = 0;
-  });
-
-  document.getElementById("previewMaxPixels").addEventListener("change", () => {
-    markPreviewDirty();
-    progressEl.value = 0;
-  });
-
   document.getElementById("previewFps").addEventListener("input", () => {
     markPreviewDirty();
     progressEl.value = 0;
@@ -995,6 +1083,49 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       progressEl.value = 0;
     });
   }
+
+  for (const id of [...controlIds, "previewTime"]) {
+    setupRangeWithNumber(id);
+  }
+
+  previewModeControl = setupSelectionBox("previewMode", {
+    onChange: () => {
+      if (isStillPreviewMode()) {
+        previewNeedsSeek = true;
+      }
+      updatePreviewControlsState();
+      syncVideoPlaybackState();
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
+
+  previewScaleControl = setupSelectionBox("previewScale", {
+    valueParser: Number,
+    onChange: () => {
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
+
+  sourceScaleControl = setupSelectionBox("sourceScale", {
+    valueParser: Number,
+    onChange: () => {
+      refreshRendererSource();
+      if (loadedSourceType === "video" && isStillPreviewMode()) {
+        previewNeedsSeek = true;
+      }
+      progressEl.value = 0;
+    },
+  });
+
+  previewMaxPixelsControl = setupSelectionBox("previewMaxPixels", {
+    valueParser: Number,
+    onChange: () => {
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
 
   setExportAvailability();
   initializePresets();
