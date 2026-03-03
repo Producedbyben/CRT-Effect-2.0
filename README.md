@@ -27,6 +27,16 @@ Then open `http://localhost:8080`.
 - H.264 profile/codec support varies by OS/browser build.
 - Large resolutions + long durations are CPU-intensive and may freeze the tab while encoding.
 
+
+## Included presets
+
+Alongside the base presets, the renderer now ships with additional looks inspired by common CRT-era display chains:
+
+- **Trinitron RGB Monitor**: low distortion, tight mask, clean broadcast/monitor-style output.
+- **VHS Composite**: stronger bloom/chromatic bleed and noise to emulate consumer composite tape playback.
+- **Portable CRT**: heavier curvature and scanline presence for small-screen portable sets.
+- **Late-Night Broadcast**: balanced glow and noise for over-the-air late-night TV texture.
+
 ## CRT tuning tips
 
 - **Consumer TV look**: increase barrel distortion, bloom, chromatic aberration, and moderate scanlines.
