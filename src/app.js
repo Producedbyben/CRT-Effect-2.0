@@ -379,7 +379,7 @@ function getTargetBitrate(width, height, fps) {
   return Math.max(5_000_000, Math.min(35_000_000, estimated));
 }
 
-async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress, signal }) {
+async function exportMp4({ canvas, renderer, params, fps, duration, beforeRenderFrame, onProgress, signal, bitrateScale = 1 }) {
   if (!("VideoEncoder" in window)) {
     throw new Error("WebCodecs VideoEncoder is unavailable in this browser/context.");
   }
@@ -412,7 +412,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   });
 
   const codec = getAvcCodecForResolution(width, height);
-  const bitrate = getTargetBitrate(width, height, fps);
+  const bitrate = Math.max(250_000, Math.round(getTargetBitrate(width, height, fps) * Math.max(0.5, bitrateScale)));
 
   try {
     encoder.configure({
@@ -476,6 +476,93 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   downloadBlob(blob, `crt-export-${Date.now()}.mp4`);
 }
 
+function getSupportedWebmMimeType(withAudio) {
+  const candidates = withAudio
+    ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+    : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || "video/webm";
+}
+
+async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loadedSourceType, loadedVideo, loadedImage, sourceScale, onProgress, signal, includeAudio }) {
+  const width = canvas.width;
+  const height = canvas.height;
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+  const totalFrames = Math.max(1, Math.floor(duration * fps));
+
+  const stream = canvas.captureStream(fps);
+  const sourceVideo = loadedSourceType === "video" ? loadedVideo?.video : null;
+  const wantsAudio = includeAudio && !!sourceVideo;
+
+  if (wantsAudio) {
+    try {
+      const mediaStream = sourceVideo.captureStream?.() || sourceVideo.mozCaptureStream?.();
+      const audioTrack = mediaStream?.getAudioTracks?.()[0];
+      if (audioTrack) {
+        stream.addTrack(audioTrack);
+      }
+    } catch (error) {
+      console.warn("Couldn't capture original audio track; exporting without audio.", error);
+    }
+  }
+
+  const mimeType = getSupportedWebmMimeType(wantsAudio);
+  const chunks = [];
+  const recorder = new MediaRecorder(stream, {
+    mimeType,
+    videoBitsPerSecond: getTargetBitrate(width, height, fps),
+  });
+
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data && event.data.size > 0) chunks.push(event.data);
+  });
+
+  const stopPromise = new Promise((resolve) => {
+    recorder.addEventListener("stop", resolve, { once: true });
+  });
+
+  recorder.start(250);
+
+  if (sourceVideo) {
+    await seekVideo(sourceVideo, 0);
+    sourceVideo.pause();
+  }
+
+  const start = performance.now();
+  for (let frame = 0; frame < totalFrames; frame++) {
+    if (signal?.aborted) {
+      recorder.stop();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+
+    const t = frame / fps;
+    if (sourceVideo) {
+      await seekVideo(sourceVideo, t);
+      renderer.setImage(sourceVideo, sourceScale());
+    } else if (loadedImage) {
+      renderer.setImage(loadedImage, sourceScale());
+    }
+
+    renderer.render(ctx, width, height, t, params, frame, fps);
+    onProgress?.((frame + 1) / totalFrames, frame + 1, totalFrames);
+
+    const nextFrameAt = start + ((frame + 1) * 1000) / fps;
+    const delay = Math.max(0, nextFrameAt - performance.now());
+    if (delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  recorder.stop();
+  await stopPromise;
+
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
+
+  const blob = new Blob(chunks, { type: mimeType });
+  downloadBlob(blob, `crt-export-${Date.now()}.webm`);
+}
+
 (function boot() {
   const renderer = new CRTRenderer();
   const canvas = document.getElementById("previewCanvas");
@@ -516,6 +603,105 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
   let isExporting = false;
   let previewDirty = true;
 
+  function setupRangeWithNumber(id) {
+    const slider = document.getElementById(id);
+    if (!slider) return;
+    const wrapper = slider.closest(".range-control");
+    if (!wrapper) return;
+
+    const numericInput = document.createElement("input");
+    numericInput.type = "number";
+    numericInput.className = "range-number";
+    numericInput.min = slider.min;
+    numericInput.max = slider.max;
+    numericInput.step = slider.step || "any";
+    numericInput.value = slider.value;
+    numericInput.setAttribute("aria-label", `${id} numeric value`);
+    wrapper.appendChild(numericInput);
+
+    const syncToNumber = () => {
+      numericInput.value = slider.value;
+      numericInput.disabled = slider.disabled;
+    };
+
+    const clampToRange = (value) => {
+      const min = Number(slider.min);
+      const max = Number(slider.max);
+      let next = Number(value);
+      if (!Number.isFinite(next)) return Number(slider.value);
+      if (Number.isFinite(min)) next = Math.max(min, next);
+      if (Number.isFinite(max)) next = Math.min(max, next);
+      return next;
+    };
+
+    numericInput.addEventListener("input", () => {
+      const next = clampToRange(numericInput.value);
+      slider.value = String(next);
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    numericInput.addEventListener("change", () => {
+      const next = clampToRange(numericInput.value);
+      slider.value = String(next);
+      numericInput.value = slider.value;
+      slider.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    slider.addEventListener("input", syncToNumber);
+    slider.addEventListener("change", syncToNumber);
+    slider.__syncRangeNumber = syncToNumber;
+    syncToNumber();
+  }
+
+  function setupSelectionBox(id, { onChange, valueParser = (value) => value, disabledWhen } = {}) {
+    const root = document.getElementById(id);
+    if (!root) return { getValue: () => undefined, setValue: () => {}, setDisabled: () => {} };
+
+    const buttons = Array.from(root.querySelectorAll("button[data-value]"));
+    let current = buttons.find((btn) => btn.dataset.selected === "true")?.dataset.value ?? buttons[0]?.dataset.value;
+
+    const setSelectedVisual = () => {
+      for (const btn of buttons) {
+        const active = btn.dataset.value === current;
+        btn.dataset.selected = active ? "true" : "false";
+        btn.setAttribute("aria-checked", active ? "true" : "false");
+      }
+    };
+
+    const setDisabled = (disabled) => {
+      root.dataset.disabled = disabled ? "true" : "false";
+      for (const btn of buttons) {
+        btn.disabled = !!disabled;
+      }
+    };
+
+    const setValue = (value, { silent = false } = {}) => {
+      const next = String(value);
+      if (!buttons.some((btn) => btn.dataset.value === next)) return;
+      current = next;
+      setSelectedVisual();
+      if (!silent) onChange?.(valueParser(current));
+    };
+
+    for (const btn of buttons) {
+      btn.type = "button";
+      btn.setAttribute("role", "radio");
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        setValue(btn.dataset.value);
+      });
+    }
+
+    setSelectedVisual();
+    if (typeof disabledWhen === "boolean") setDisabled(disabledWhen);
+
+    return {
+      getValue: () => valueParser(current),
+      setValue: (value, options) => setValue(value, options),
+      setDisabled,
+    };
+  }
+
   function setStatus(message, mode = "info") {
     statusEl.textContent = message;
     statusEl.dataset.mode = mode;
@@ -525,23 +711,36 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     exportBtn.disabled = !hasLoadedSource || isExporting;
     cancelExportBtn.disabled = !isExporting;
     resetSourceBtn.disabled = isExporting;
+    resetParamsBtn.disabled = isExporting;
     imageInput.disabled = isExporting;
+    document.getElementById("fps").disabled = isExporting;
+    document.getElementById("duration").disabled = isExporting;
+    document.getElementById("exportQuality").disabled = isExporting;
+    exportFormatControl?.setDisabled(isExporting);
+    updateExportControlsState();
   }
 
+  let previewModeControl;
+  let previewScaleControl;
+  let sourceScaleControl;
+  let previewMaxPixelsControl;
+  let presetControl;
+  let exportFormatControl;
+
   function isStillPreviewMode() {
-    return document.getElementById("previewMode").value === "still";
+    return previewModeControl?.getValue() === "still";
   }
 
   function getPreviewScale() {
-    return Math.max(0.1, Number(document.getElementById("previewScale").value) || 1);
+    return Math.max(0.1, Number(previewScaleControl?.getValue()) || 1);
   }
 
   function getSourceScale() {
-    return Math.max(0.1, Number(document.getElementById("sourceScale").value) || 1);
+    return Math.max(0.1, Number(sourceScaleControl?.getValue()) || 1);
   }
 
   function getPreviewMaxPixels() {
-    return Math.max(0, Number(document.getElementById("previewMaxPixels").value) || 0);
+    return Math.max(0, Number(previewMaxPixelsControl?.getValue()) || 0);
   }
 
   function markPreviewDirty() {
@@ -584,6 +783,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
 
     previewTime.disabled = !isVideo;
     previewFps.disabled = !isVideo || stillMode;
+    previewModeControl?.setDisabled(!isVideo);
   }
 
   function syncPreviewTimeControl() {
@@ -593,7 +793,16 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
     previewFrameSeconds = previewTargetSeconds;
     previewTime.value = previewTargetSeconds.toFixed(3);
+    previewTime.__syncRangeNumber?.();
     previewNeedsSeek = loadedSourceType === "video";
+  }
+
+
+  function updateExportControlsState() {
+    const includeAudio = document.getElementById("includeOriginalAudio");
+    const isVideo = loadedSourceType === "video" && loadedVideo?.video;
+    includeAudio.disabled = isExporting || !isVideo;
+    if (!isVideo) includeAudio.checked = false;
   }
 
   function syncVideoPlaybackState() {
@@ -618,10 +827,12 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     const targetValues = defaultParamValues || readParams();
     for (const id of controlIds) {
       if (typeof targetValues[id] === "number") {
-        document.getElementById(id).value = targetValues[id];
+        const slider = document.getElementById(id);
+        slider.value = targetValues[id];
+        slider.__syncRangeNumber?.();
       }
     }
-    document.getElementById("sourceScale").value = "1";
+    sourceScaleControl?.setValue("1", { silent: true });
     refreshRendererSource();
     if (loadedSourceType === "video" && isStillPreviewMode()) {
       previewNeedsSeek = true;
@@ -663,6 +874,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     previewNeedsSeek = false;
     syncPreviewTimeControl();
     updatePreviewControlsState();
+    updateExportControlsState();
     progressEl.value = 0;
     markPreviewDirty();
     setExportAvailability();
@@ -681,7 +893,9 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     if (!values) return;
     for (const id of controlIds) {
       if (typeof values[id] === "number") {
-        document.getElementById(id).value = values[id];
+        const slider = document.getElementById(id);
+        slider.value = values[id];
+        slider.__syncRangeNumber?.();
       }
     }
   }
@@ -691,23 +905,35 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     presetSelect.innerHTML = "";
 
     if (names.length === 0) {
-      const opt = document.createElement("option");
-      opt.textContent = "No presets available";
-      opt.disabled = true;
-      opt.selected = true;
-      presetSelect.appendChild(opt);
+      const message = document.createElement("div");
+      message.className = "selection-empty";
+      message.textContent = "No presets available";
+      presetSelect.appendChild(message);
       return;
     }
 
     for (const name of names) {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      presetSelect.appendChild(opt);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.value = name;
+      button.textContent = name;
+      if (name === "Consumer TV") {
+        button.dataset.selected = "true";
+      }
+      presetSelect.appendChild(button);
     }
 
+    presetControl = setupSelectionBox("presetSelect", {
+      onChange: (name) => {
+        applyPreset(name);
+        markPreviewDirty();
+        progressEl.value = 0;
+        setStatus(`Preset applied: ${name}`, "success");
+      },
+    });
+
     const defaultPreset = presets["Consumer TV"] ? "Consumer TV" : names[0];
-    presetSelect.value = defaultPreset;
+    presetControl.setValue(defaultPreset, { silent: true });
     applyPreset(defaultPreset);
   }
 
@@ -798,6 +1024,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
           markPreviewDirty();
           previewTargetSeconds = previewFrameSeconds;
           document.getElementById("previewTime").value = previewFrameSeconds.toFixed(3);
+          document.getElementById("previewTime").__syncRangeNumber?.();
         }
       }
     }
@@ -849,6 +1076,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
         updatePreviewControlsState();
+        updateExportControlsState();
         syncVideoPlaybackState();
         markPreviewDirty();
 
@@ -863,6 +1091,7 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
         updatePreviewControlsState();
+        updateExportControlsState();
         markPreviewDirty();
         setStatus(`Loaded image ${file.name}. Ready to export.`, "success");
       }
@@ -878,41 +1107,6 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       setStatus(`Couldn't load media: ${error.message}`, "error");
       console.error(error);
     }
-  });
-
-  presetSelect.addEventListener("change", () => {
-    applyPreset(presetSelect.value);
-    markPreviewDirty();
-    progressEl.value = 0;
-    setStatus(`Preset applied: ${presetSelect.value}`, "success");
-  });
-
-  document.getElementById("previewMode").addEventListener("change", () => {
-    if (isStillPreviewMode()) {
-      previewNeedsSeek = true;
-    }
-    updatePreviewControlsState();
-    syncVideoPlaybackState();
-    markPreviewDirty();
-    progressEl.value = 0;
-  });
-
-  document.getElementById("previewScale").addEventListener("change", () => {
-    markPreviewDirty();
-    progressEl.value = 0;
-  });
-
-  document.getElementById("sourceScale").addEventListener("change", () => {
-    refreshRendererSource();
-    if (loadedSourceType === "video" && isStillPreviewMode()) {
-      previewNeedsSeek = true;
-    }
-    progressEl.value = 0;
-  });
-
-  document.getElementById("previewMaxPixels").addEventListener("change", () => {
-    markPreviewDirty();
-    progressEl.value = 0;
   });
 
   document.getElementById("previewFps").addEventListener("input", () => {
@@ -941,25 +1135,54 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
       setStatus("Preparing export...", "info");
       const fps = Math.max(1, Number(document.getElementById("fps").value) || 30);
       const duration = Math.max(0.5, Number(document.getElementById("duration").value) || 4);
+      const qualityMultiplier = Math.max(0.5, Math.min(2.5, Number(document.getElementById("exportQuality").value) || 1));
+      const includeOriginalAudio = document.getElementById("includeOriginalAudio").checked;
+      const selectedFormat = exportFormatControl?.getValue() || "mp4";
+      const mustUseRealtimeAudio = includeOriginalAudio && loadedSourceType === "video";
 
-      await exportMp4({
-        canvas,
-        renderer,
-        params: readParams(),
-        fps,
-        duration,
-        beforeRenderFrame: loadedSourceType === "video" && loadedVideo
-          ? async (t) => {
-              await seekVideo(loadedVideo.video, t);
-              renderer.setImage(loadedVideo.video, getSourceScale());
-            }
-          : null,
-        onProgress: (value, current, total) => {
-          progressEl.value = value;
-          setStatus(`Encoding frame ${current}/${total}`, "info");
-        },
-        signal: activeExportController.signal,
-      });
+      if (selectedFormat === "mp4" && mustUseRealtimeAudio) {
+        setStatus("Audio passthrough requires WebM realtime export. Switching format for this render.", "warn");
+      }
+
+      if (selectedFormat === "webm" || mustUseRealtimeAudio) {
+        await exportWebmRealtime({
+          canvas,
+          renderer,
+          params: readParams(),
+          fps,
+          duration,
+          loadedSourceType,
+          loadedVideo,
+          loadedImage,
+          sourceScale: getSourceScale,
+          includeAudio: includeOriginalAudio,
+          onProgress: (value, current, total) => {
+            progressEl.value = value;
+            setStatus(`Realtime export frame ${current}/${total}`, "info");
+          },
+          signal: activeExportController.signal,
+        });
+      } else {
+        await exportMp4({
+          canvas,
+          renderer,
+          params: readParams(),
+          fps,
+          duration,
+          beforeRenderFrame: loadedSourceType === "video" && loadedVideo
+            ? async (t) => {
+                await seekVideo(loadedVideo.video, t);
+                renderer.setImage(loadedVideo.video, getSourceScale());
+              }
+            : null,
+          onProgress: (value, current, total) => {
+            progressEl.value = value;
+            setStatus(`Encoding frame ${current}/${total}`, "info");
+          },
+          signal: activeExportController.signal,
+          bitrateScale: qualityMultiplier,
+        });
+      }
       setStatus("Export finished. Download should begin automatically.", "success");
     } catch (error) {
       if (error?.name === "AbortError") {
@@ -996,10 +1219,60 @@ async function exportMp4({ canvas, renderer, params, fps, duration, beforeRender
     });
   }
 
+  for (const id of [...controlIds, "previewTime"]) {
+    setupRangeWithNumber(id);
+  }
+
+  previewModeControl = setupSelectionBox("previewMode", {
+    onChange: () => {
+      if (isStillPreviewMode()) {
+        previewNeedsSeek = true;
+      }
+      updatePreviewControlsState();
+      syncVideoPlaybackState();
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
+
+  previewScaleControl = setupSelectionBox("previewScale", {
+    valueParser: Number,
+    onChange: () => {
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
+
+  sourceScaleControl = setupSelectionBox("sourceScale", {
+    valueParser: Number,
+    onChange: () => {
+      refreshRendererSource();
+      if (loadedSourceType === "video" && isStillPreviewMode()) {
+        previewNeedsSeek = true;
+      }
+      progressEl.value = 0;
+    },
+  });
+
+  previewMaxPixelsControl = setupSelectionBox("previewMaxPixels", {
+    valueParser: Number,
+    onChange: () => {
+      markPreviewDirty();
+      progressEl.value = 0;
+    },
+  });
+
+  exportFormatControl = setupSelectionBox("exportFormat", {
+    onChange: () => {
+      progressEl.value = 0;
+    },
+  });
+
   setExportAvailability();
   initializePresets();
   defaultParamValues = readParams();
   updatePreviewControlsState();
+  updateExportControlsState();
   syncPreviewTimeControl();
   window.addEventListener("beforeunload", () => {
     if (loadedVideo?.objectUrl) {
