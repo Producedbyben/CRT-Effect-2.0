@@ -71,6 +71,7 @@ const FALLBACK_PRESETS = {
   },
 };
 
+
 const MP4_MUXER_CDN = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.2/build/mp4-muxer.mjs";
 
 function seededNoise(x, y, frame) {
