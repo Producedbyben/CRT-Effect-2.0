@@ -29,6 +29,42 @@ const FALLBACK_PRESETS = {
     chromaticAberration: 0.2,
     noise: 0.12,
   },
+  "Trinitron RGB Monitor": {
+    scanlineStrength: 0.2,
+    phosphorMask: 0.72,
+    barrelDistortion: 0.04,
+    bloom: 0.16,
+    flicker: 0.03,
+    chromaticAberration: 0.06,
+    noise: 0.05,
+  },
+  "VHS Composite": {
+    scanlineStrength: 0.48,
+    phosphorMask: 0.28,
+    barrelDistortion: 0.26,
+    bloom: 0.68,
+    flicker: 0.16,
+    chromaticAberration: 0.54,
+    noise: 0.34,
+  },
+  "Portable CRT": {
+    scanlineStrength: 0.56,
+    phosphorMask: 0.34,
+    barrelDistortion: 0.32,
+    bloom: 0.34,
+    flicker: 0.18,
+    chromaticAberration: 0.26,
+    noise: 0.24,
+  },
+  "Late-Night Broadcast": {
+    scanlineStrength: 0.35,
+    phosphorMask: 0.42,
+    barrelDistortion: 0.16,
+    bloom: 0.5,
+    flicker: 0.12,
+    chromaticAberration: 0.22,
+    noise: 0.2,
+  },
 };
 
 const renderer = new CRTRenderer();
