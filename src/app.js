@@ -5,6 +5,7 @@ import { PARAM_IDS, PRESETS } from "./core/params.js";
 
 
 
+
 const MP4_MUXER_CDN = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.2/build/mp4-muxer.mjs";
 
 function seededNoise(x, y, frame) {
@@ -867,28 +868,58 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
       try {
         return await createImageBitmap(file);
       } catch (error) {
-        console.warn("createImageBitmap failed; falling back to Image.decode", error);
+        console.warn("createImageBitmap failed; falling back to Image() load", error);
       }
     }
 
-    const img = new Image();
     const objectUrl = URL.createObjectURL(file);
-    img.src = objectUrl;
-    try {
-      await img.decode();
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
+    const img = new Image();
+
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        img.onload = null;
+        img.onerror = null;
+      };
+
+      img.onload = () => {
+        cleanup();
+        resolve();
+      };
+      img.onerror = () => {
+        cleanup();
+        reject(new Error("The selected image format could not be decoded by this browser."));
+      };
+      img.src = objectUrl;
+    });
+
+    URL.revokeObjectURL(objectUrl);
     return img;
   }
 
-  function waitForVideoEvent(video, eventName) {
-    return new Promise((resolve) => {
-      const handler = () => {
-        video.removeEventListener(eventName, handler);
-        resolve();
+  function waitForVideoEvent(video, eventName, timeoutMs = 4000) {
+    return new Promise((resolve, reject) => {
+      let done = false;
+
+      const cleanup = () => {
+        video.removeEventListener(eventName, onEvent);
+        video.removeEventListener("error", onError);
+        if (timer) clearTimeout(timer);
       };
-      video.addEventListener(eventName, handler, { once: true });
+
+      const finish = (result, isError = false) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        if (isError) reject(result);
+        else resolve(result);
+      };
+
+      const onEvent = () => finish();
+      const onError = () => finish(video.error || new Error(`Video event failed: ${eventName}`), true);
+      const timer = timeoutMs > 0 ? setTimeout(() => finish(), timeoutMs) : null;
+
+      video.addEventListener(eventName, onEvent, { once: true });
+      video.addEventListener("error", onError, { once: true });
     });
   }
 
@@ -917,12 +948,23 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
     video.muted = true;
     video.loop = true;
     video.playsInline = true;
-    video.crossOrigin = "anonymous";
     video.preload = "auto";
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
     video.load();
     await waitForVideoEvent(video, "loadedmetadata");
+
+    try {
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        await Promise.race([playPromise, new Promise((resolve) => setTimeout(resolve, 250))]);
+      }
+    } catch (error) {
+      // Ignore autoplay restrictions; we only need decode readiness.
+    } finally {
+      video.pause();
+    }
+
     await ensureVideoFrameReady(video);
     return { video, objectUrl };
   }
