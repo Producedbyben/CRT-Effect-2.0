@@ -4,6 +4,7 @@ import { PARAM_IDS, PRESETS } from "./core/params.js";
 
 
 
+
 const MP4_MUXER_CDN = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.2/build/mp4-muxer.mjs";
 
 function seededNoise(x, y, frame) {
@@ -712,7 +713,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
 
   function syncPreviewTimeControl() {
     const previewTime = document.getElementById("previewTime");
-    const max = loadedVideo?.video?.duration ? Math.max(0, loadedVideo.video.duration - 0.001) : 0;
+    const max = loadedVideo?.video ? Math.max(0, getSafeVideoDuration(loadedVideo.video) - 0.001) : 0;
     previewTime.max = max.toFixed(3);
     previewTargetSeconds = Math.max(0, Math.min(previewTargetSeconds, max));
     previewFrameSeconds = previewTargetSeconds;
@@ -891,14 +892,24 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
     });
   }
 
+  function getSafeVideoDuration(video) {
+    const duration = Number(video?.duration);
+    return Number.isFinite(duration) && duration > 0 ? duration : 4;
+  }
+
   async function ensureVideoFrameReady(video) {
     if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) return;
 
-    await Promise.race([
-      waitForVideoEvent(video, "loadeddata"),
-      waitForVideoEvent(video, "canplay"),
-      new Promise((resolve) => setTimeout(resolve, 300)),
-    ]);
+    const timeoutAt = performance.now() + 3000;
+    while (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      await Promise.race([
+        waitForVideoEvent(video, "loadeddata"),
+        waitForVideoEvent(video, "canplay"),
+        waitForVideoEvent(video, "timeupdate"),
+        new Promise((resolve) => setTimeout(resolve, 150)),
+      ]);
+      if (performance.now() >= timeoutAt) break;
+    }
   }
 
   async function loadVideoFromFile(file) {
@@ -913,14 +924,11 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
     video.load();
     await waitForVideoEvent(video, "loadedmetadata");
     await ensureVideoFrameReady(video);
-    if (!Number.isFinite(video.duration) || video.duration <= 0) {
-      throw new Error("Video metadata is invalid or duration is unavailable.");
-    }
     return { video, objectUrl };
   }
 
   async function seekVideo(video, timeSeconds) {
-    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, video.duration - 0.000001)));
+    const clamped = Math.max(0, Math.min(timeSeconds, Math.max(0, getSafeVideoDuration(video) - 0.000001)));
     if (Math.abs(video.currentTime - clamped) < 0.0005) {
       await ensureVideoFrameReady(video);
       return;
@@ -1010,7 +1018,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
 
         canvas.width = videoSource.video.videoWidth;
         canvas.height = videoSource.video.videoHeight;
-        document.getElementById("duration").value = Math.max(0.5, videoSource.video.duration).toFixed(2);
+        document.getElementById("duration").value = Math.max(0.5, getSafeVideoDuration(videoSource.video)).toFixed(2);
         previewTargetSeconds = 0;
         previewFrameSeconds = 0;
         syncPreviewTimeControl();
@@ -1019,7 +1027,7 @@ async function exportWebmRealtime({ canvas, renderer, params, fps, duration, loa
         syncVideoPlaybackState();
         markPreviewDirty();
 
-        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${videoSource.video.duration.toFixed(2)}s). Ready to export.`, "success");
+        setStatus(`Loaded video ${file.name} (${videoSource.video.videoWidth}x${videoSource.video.videoHeight}, ${getSafeVideoDuration(videoSource.video).toFixed(2)}s). Ready to export.`, "success");
       } else {
         const imageSource = await loadImageFromFile(file);
         progressEl.value = 0.4;
